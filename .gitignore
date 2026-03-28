@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.env
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# PyInstaller / portable builds
+build_portable/
+dist_portable/
+outputs_test_run/
+*.spec.bak
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Project outputs & heavy artifacts
+outputs/
+*.xlsx~
+~$*
+
+# CNN weights (large; see models/README.txt)
+models/**/*.pb
+models/**/*.data-*
+models/**/*.index
+models/**/variables/
+models/*.h5
+models/*.h6
+models/model_weights.h6/
+# Allow README in models/
+!models/README.txt
+
+# Logs / local
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
