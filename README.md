@@ -26,15 +26,17 @@ When comparing preprocessing logic, treat `mouse-usv-asd-pipeline/src/preprocess
 ## Running
 
 - **Developer:** `pip install -r requirements.txt`, then `python app.py`.
-- **Programmatic:** `from pipeline import execute_pipeline` — returns `(primary_xlsx_path, RunSummary)`; optional kwargs: `output_dir`, `years`, `want_syllables_xlsx`, `want_metadata_xlsx`, `metadata_only`. Progress callback: `(progress, message, eta_seconds=None)`.
+- **Programmatic:** `from pipeline import execute_pipeline` — returns `(primary_xlsx_path, RunSummary)`; optional kwargs: `output_dir`, `years`, `want_syllables_xlsx`, `want_metadata_xlsx`, `metadata_only`. `RunSummary.output_directory` is the resolved output folder. Progress callback: `(progress, message, eta_seconds=None)`.
 - **Packaged:** see `docs/BUILD.md` (Windows portable + installer, macOS `.app`).
 
 ## Outputs
 
-Configurable in the UI:
+Configurable in the UI (English):
 
-1. **Syllable Excel** — one row per detected syllable with enriched columns (default on).
-2. **Recording metadata Excel** — one row per metadata row with resolved WAV path, status, and optional syllable count (default on).
+1. **Segmentation workbook** — syllable-level Excel (segmentation, features, CNN, enrich). When this is the only selection, the recording scan file is **not** written (inventory still runs internally as needed).
+2. **Recording scan workbook** — `recordings_metadata_<year>_<timestamp>.xlsx` with paths and status. Scan-only runs skip segmentation/CNN.
+
+Timestamp in filenames uses the form `YYYY-MM-DD_HH-MM-SS` (e.g. `segmentation_2015_2026-03-28_19-30-53.xlsx`).
 
 ## Model weights
 

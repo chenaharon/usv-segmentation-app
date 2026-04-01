@@ -168,8 +168,18 @@ def resolve_wav_under_year_folder(
     :func:`pup_identity_key` when the Excel ``Name`` does not match the dirname
     (e.g. ``17450L`` vs ``17450L_WT``, or ``24277J-2A (J)`` vs ``24277J-2A (BLUE) ...``).
     """
+    roots: List[Path] = [year_root]
+    # Some exports add an extra nested year directory: <selected>/<year>/<Mother_...>/...
+    try:
+        nested_year_dirs = sorted(
+            p for p in year_root.iterdir() if p.is_dir() and re.fullmatch(r"\d{4}", p.name)
+        )
+        roots.extend(nested_year_dirs)
+    except OSError:
+        pass
+
     for base in iter_recording_base_candidates(
-        [year_root],
+        roots,
         mother,
         matgen,
         name,

@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('preprocessing', 'preprocessing'), ('models', 'models')]
+datas = [('preprocessing', 'preprocessing'), ('models', 'models'), ('assets', 'assets')]
 binaries = []
 hiddenimports = ['utils', 'steps', 'legacy', 'metadata_export', 'pandas']
 hiddenimports += collect_submodules('utils')
@@ -43,6 +43,7 @@ exe = EXE(
     a.datas,
     [],
     name='SegmentationAppPortable',
+    icon='assets/app_icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -52,30 +52,18 @@ def is_segmentation_file_exist(file_name: str, outputs_dir: str = "outputs") -> 
 def is_already_processed(file_name: str, outputs_dir: str = "outputs") -> bool:
     """
     Check if a metadata file has already been fully processed.
-    
-    A file is considered processed if all expected output files exist:
-    - outputs/<file_name> (xlsx)
-    - outputs/<stem>.csv
-    - outputs/<stem>.npy
-    
-    Args:
-        file_name: Name of the metadata file (e.g., "metadata_2022.xlsx")
-        outputs_dir: Path to the outputs directory (default: "outputs")
-    
-    Returns:
-        True if all expected output files exist, False otherwise
+
+    A file is considered processed if the main Excel output exists and the
+    companion CSV exists (``.npy`` is optional — desktop pipeline may skip it).
     """
     outputs_path = Path(outputs_dir)
     output_filename = get_output_filename(file_name)
     output_stem = Path(output_filename).stem
-    
-    # Expected output files
+
     xlsx_file = outputs_path / output_filename
     csv_file = outputs_path / f"{output_stem}.csv"
-    npy_file = outputs_path / f"{output_stem}.npy"
-    
-    # Check if all files exist
-    return xlsx_file.exists() and csv_file.exists() and npy_file.exists()
+
+    return xlsx_file.exists() and csv_file.exists()
 
 
 # Required column names from metadata Excel files
@@ -100,12 +88,13 @@ METADATA_REQUIRED_COLUMNS = [
 ]
 
 def _header_match_key(name: str) -> str:
-    """Normalize header for alias lookup (ASCII → lower case; Hebrew/other → strip only)."""
+    """Normalize header for alias lookup (case-insensitive, separator-insensitive)."""
     s = str(name).strip()
     if not s:
         return ""
-    if all(ord(ch) < 128 for ch in s):
-        return s.lower()
+    s = s.lower()
+    for ch in (" ", "\t", "\n", "_", "-", "/", "\\", "(", ")", "[", "]", "{", "}", ".", ",", ":", ";", "|", '"', "'"):
+        s = s.replace(ch, "")
     return s
 
 
@@ -149,6 +138,10 @@ _METADATA_CANONICAL_ALIASES: Dict[str, Tuple[str, ...]] = {
         "gender",
         "Gender",
         "GENDER",
+        "gender/sex",
+        "sex/gender",
+        "gender sex",
+        "sex gender",
         "מין",
         "מגדר",
     ),
@@ -202,6 +195,53 @@ def _metadata_alias_lookup() -> Dict[str, str]:
 
 def get_metadata_alias_lookup() -> Dict[str, str]:
     return _metadata_alias_lookup()
+
+
+def _read_excel_with_header_detection(
+    metadata_path: str,
+    required_columns: Tuple[str, ...],
+    max_scan_rows: int = 20,
+):
+    """
+    Read first sheet while detecting header row in the first *max_scan_rows* rows.
+
+    Some lab workbooks place a title row above headers, or use mixed labels
+    like ``GENDER/SEX``. We scan early rows and pick the first one that can map
+    to all required canonical columns after alias normalization.
+    """
+    engines = ("openpyxl", "xlrd")
+    for engine in engines:
+        try:
+            probe = pd.read_excel(
+                metadata_path,
+                sheet_name=0,
+                header=None,
+                nrows=max_scan_rows,
+                engine=engine,
+            )
+        except Exception:
+            continue
+        if probe.empty:
+            continue
+        for ridx in range(min(max_scan_rows, len(probe))):
+            raw_headers = [str(v).strip() for v in probe.iloc[ridx].tolist()]
+            dummy = pd.DataFrame(columns=raw_headers)
+            mapped = normalize_metadata_columns(dummy)
+            have = {str(c).strip() for c in mapped.columns}
+            if all(req in have for req in required_columns):
+                return pd.read_excel(
+                    metadata_path,
+                    sheet_name=0,
+                    header=ridx,
+                    engine=engine,
+                )
+    # Fallback to default header row if no candidate matched.
+    for engine in engines:
+        try:
+            return pd.read_excel(metadata_path, sheet_name=0, engine=engine)
+        except Exception:
+            continue
+    raise ValueError(f"Could not read workbook: {metadata_path}")
 
 
 def normalize_metadata_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -262,7 +302,10 @@ def build_sex_lookup_from_pup_summary_xlsx(metadata_path: str) -> Dict[Tuple[str
     """
     from .audio_paths import pup_identity_key
 
-    df = pd.read_excel(metadata_path, sheet_name=0, engine="openpyxl")
+    df = _read_excel_with_header_detection(
+        metadata_path,
+        PUP_SUMMARY_REQUIRED_COLUMNS,
+    )
     df = normalize_metadata_columns(df)
     if not all(c in df.columns for c in PUP_SUMMARY_REQUIRED_COLUMNS):
         return {}
@@ -395,7 +438,10 @@ def read_metadata_as_lists(metadata_path: str) -> Dict[str, List]:
     {column_name: list_of_values}, for METADATA_REQUIRED_COLUMNS only.
     Assumes the first row is a header (matches the metadata files in this project).
     """
-    df = pd.read_excel(metadata_path, sheet_name=0, engine="openpyxl")
+    df = _read_excel_with_header_detection(
+        metadata_path,
+        tuple(METADATA_REQUIRED_COLUMNS),
+    )
     df = normalize_metadata_columns(df)
 
     missing = [c for c in METADATA_REQUIRED_COLUMNS if c not in df.columns]

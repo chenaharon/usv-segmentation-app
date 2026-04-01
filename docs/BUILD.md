@@ -9,7 +9,7 @@ pip install -r requirements.txt pyinstaller
 pyinstaller SegmentationAppPortable.spec
 ```
 
-Output: `dist/SegmentationAppPortable.exe` (single file; first launch may be slow while extracting).
+Output: `dist/SegmentationAppPortable.exe` (single file; first launch may be slow while extracting). The EXE uses `assets/app_icon.ico` (generated from `app_icon.png`); rebuild the `.ico` after changing the PNG if needed.
 
 For a **folder** build (faster startup), use a separate `.spec` with `EXE(..., exclude_binaries=True)` + `COLLECT(...)` or PyInstaller `--onedir`.
 
@@ -39,4 +39,4 @@ Use GitHub Actions with `windows-latest` and `macos-latest` jobs running the sam
 
 ## Size notes
 
-TensorFlow and OpenCV (via legacy code) dominate bundle size. The `SegmentationAppPortable.spec` `excludes` list trims test-only packages; do **not** remove `models/` or `preprocessing/` from `datas`.
+TensorFlow and OpenCV (via legacy code) dominate bundle size. The `SegmentationAppPortable.spec` `excludes` list trims test-only packages; do **not** remove `models/`, `preprocessing/`, or `assets/` (window icon) from `datas`.

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 import logging
 import os
 
@@ -69,6 +69,7 @@ def classify_syllables(
     end_syl: List,
     logger: Optional[logging.Logger] = None,
     year_audio_root: Optional[Path] = None,
+    progress_hook: Optional[Callable[[int, int], None]] = None,
 ) -> np.ndarray:
     """Classify each syllable by generating spectrograms and running the CNN model.
 
@@ -91,6 +92,7 @@ def classify_syllables(
         end_syl,
         logger=logger,
         year_audio_root=year_audio_root,
+        progress_hook=progress_hook,
     )
 
 
@@ -168,15 +170,14 @@ def run_classification(
     end_syl: List,
     logger: Optional[logging.Logger] = None,
     year_audio_root: Optional[Path] = None,
-) -> Tuple[str, str]:
+    *,
+    progress_hook: Optional[Callable[[int, int], None]] = None,
+    save_npy: bool = True,
+) -> Tuple[str, Optional[str]]:
     """Run the full syllable classification pipeline and write results to Excel.
 
-    Orchestrates five steps:
-    1. Load the pre-trained Keras CNN model
-    2. Classify each syllable via spectrogram-based CNN
-    3. Save raw predictions to .npy
-    4. Post-process probabilities into syllable numbers (0-10)
-    5. Write 'Syllable number' column to the segmentation Excel file
+    Orchestrates: load model, classify syllables, optional .npy dump, post-process,
+    write 'Syllable number' column to the segmentation Excel file.
 
     Args:
         file_path: Path to the segmentation Excel file (will be updated)
@@ -195,7 +196,7 @@ def run_classification(
         logger: Optional logger instance
 
     Returns:
-        Tuple of (output_xlsx_path, output_npy_path)
+        Tuple of (output_xlsx_path, output_npy_path or None if save_npy is False)
     """
     if logger:
         logger.info("Classification started")
@@ -217,11 +218,12 @@ def run_classification(
         end_syl,
         logger=logger,
         year_audio_root=year_audio_root,
+        progress_hook=progress_hook,
     )
     if logger:
         logger.debug(f"Samples: {samples}")
 
-    output_npy = save_raw_predictions(file_path, samples)
+    output_npy: Optional[str] = save_raw_predictions(file_path, samples) if save_npy else None
 
     syl_num = postprocess_predictions(samples, logger=logger)
 

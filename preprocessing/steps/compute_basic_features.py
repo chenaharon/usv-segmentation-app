@@ -80,6 +80,7 @@ def compute_basic_features(
             start_syl,
             end_syl,
             rate,
+            logger=logger,
         )
     else:
         if signal_vec is None:
@@ -100,6 +101,7 @@ def compute_basic_features(
             start_syl,
             end_syl,
             rate,
+            logger=logger,
         )
     
     workbook = openpyxl.load_workbook(file_path)

@@ -122,11 +122,10 @@ def enrich_segmentation_columns(
     # 5a. Syllable order within recording (by ascending Start point)
     #     Group by Path (unique per recording) to handle repeated Recording Numbers
     #     across different mice.
-    df["Syllable order (in recording)"] = (
-        df.groupby("Path")["Start point(s)"]
-        .rank(method="first")
-        .astype(int)
-    )
+    #     Missing Start point(s) → NaN rank; nullable Int64 avoids
+    #     "Cannot convert non-finite values (NA or inf) to integer".
+    _rank = df.groupby("Path")["Start point(s)"].rank(method="first")
+    df["Syllable order (in recording)"] = _rank.astype("Int64")
 
     # 5b. Number of syllables in each recording
     df["Syllables per recording"] = (
@@ -135,7 +134,8 @@ def enrich_segmentation_columns(
 
     # 6. Noise indicator: 1 when Start Point (Hz) == End Point (Hz)
     if "Start Point (Hz)" in df.columns and "End Point (Hz)" in df.columns:
-        df["Noise"] = (df["Start Point (Hz)"] == df["End Point (Hz)"]).astype(int)
+        _noise = df["Start Point (Hz)"] == df["End Point (Hz)"]
+        df["Noise"] = _noise.fillna(False).astype("int64")
     else:
         df["Noise"] = 0
 

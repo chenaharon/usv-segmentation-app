@@ -19,7 +19,7 @@ from tensorflow.keras.preprocessing import image
 import pandas as pd
 import xlrd
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from utils.audio_paths import resolve_recording_wav
 import math
@@ -64,6 +64,7 @@ def Syl_Class_Vec(
     finish,
     logger=None,
     year_audio_root: Optional[Path] = None,
+    progress_hook: Optional[Callable[[int, int], None]] = None,
 ):
   # Commented out IPython magic to ensure Python compatibility.
 
@@ -96,7 +97,8 @@ def Syl_Class_Vec(
   processed_recordings = set()
   processed_count = 0
   
-  for i in range(len(mother)):
+  n_mother = len(mother)
+  for i in range(n_mother):
     resolved = resolve_recording_wav(
         year, mother[i], matgen[i], name[i], pupgen[i], age[i], session[i], rec_num[i],
         year_folder=year_audio_root,
@@ -104,6 +106,8 @@ def Syl_Class_Vec(
     if resolved is None:
       if logger:
         logger.warning(f"Recording file not found: {name[i]}, rec_num {rec_num[i]}, skipping syllable")
+      if progress_hook is not None:
+        progress_hook(i + 1, n_mother)
       continue
     path = str(resolved)
     if i>0 and (rec_num[i] != rec_num[i-1] or name[i] != name[i-1]):
@@ -145,6 +149,8 @@ def Syl_Class_Vec(
     pred.append(predict)
     if len(pred) > 1:
       timeB.append(start[i] - finish[i-1])
+    if progress_hook is not None:
+      progress_hook(i + 1, n_mother)
 
   # Don't forget the last recording
   if len(pred) > 0:
