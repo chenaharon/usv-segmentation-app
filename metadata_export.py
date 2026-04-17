@@ -41,7 +41,7 @@ def _meta_row_dict(r: MetadataRow) -> Dict[str, Any]:
         "Day": r.day,
         "Session": r.session,
         "Recording Number": r.recording_number,
-        "WAV absolute path": r.wav_absolute_path,
+        "Recording file (absolute path)": r.wav_absolute_path,
         "Path (Excel style)": r.path_column_style,
         "Status": r.status,
     }
@@ -54,6 +54,27 @@ def _meta_row_dict(r: MetadataRow) -> Dict[str, Any]:
 
 def save_metadata_inventory(path: str, rows: List[MetadataRow]) -> str:
     df = pd.DataFrame([_meta_row_dict(r) for r in rows])
+    df.to_excel(path, index=False, engine="openpyxl")
+    return path
+
+
+PROCESSING_SUMMARY_COLUMNS = [
+    "Year",
+    "Total mice (pups)",
+    "Total recordings",
+    "Total syllables",
+    "Mice with syllables detected",
+    "Recordings with syllables",
+]
+
+
+def save_processing_summary_workbook(path: str, rows: List[Dict[str, Any]]) -> str:
+    """Write per-year processing stats (English headers). *rows* keys match PROCESSING_SUMMARY_COLUMNS."""
+    df = pd.DataFrame(rows)
+    for col in PROCESSING_SUMMARY_COLUMNS:
+        if col not in df.columns:
+            df[col] = "" if col == "Year" else 0
+    df = df[PROCESSING_SUMMARY_COLUMNS]
     df.to_excel(path, index=False, engine="openpyxl")
     return path
 

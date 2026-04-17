@@ -17,12 +17,15 @@ build/
 # PyInstaller / portable builds
 build_portable/
 dist_portable/
+dist_installer/
+dist_installer_macos/
 outputs_test_run/
 *.spec.bak
 
 # IDE / OS
 .idea/
 .vscode/
+*.code-workspace
 *.swp
 .DS_Store
 Thumbs.db

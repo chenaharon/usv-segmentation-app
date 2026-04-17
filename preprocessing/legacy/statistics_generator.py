@@ -9,6 +9,7 @@ Original file is located at
 
 
 
+import gc
 import numpy as np
 import PIL.Image as Image
 import matplotlib.pyplot as plt
@@ -19,7 +20,7 @@ from tensorflow.keras.preprocessing import image
 import pandas as pd
 import xlrd
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from utils.audio_paths import resolve_recording_wav
 import math
@@ -30,6 +31,11 @@ import librosa
 import librosa.display
 import cv2
 import logging
+
+# Smaller micro-batches are gentler on typical home PCs (8GB RAM, CPU or iGPU).
+_PREDICT_BATCH_SIZE = 32
+# Syllables stacked per ``model.predict`` call (fewer TF round-trips than per-recording).
+_GLOBAL_INFERENCE_CHUNK = 2048
 
 def butter_highpass_filter(cutoff_H, fs, order):
   nyq = 0.5*fs
@@ -62,9 +68,10 @@ def Syl_Class_Vec(
     rec_num,
     start,
     finish,
+    wav_paths=None,
     logger=None,
     year_audio_root: Optional[Path] = None,
-    progress_hook: Optional[Callable[[int, int], None]] = None,
+    progress_hook: Optional[Callable[..., None]] = None,
 ):
   # Commented out IPython magic to ensure Python compatibility.
 
@@ -73,6 +80,45 @@ def Syl_Class_Vec(
   cutoff_H = 30*10**3
   c, d = butter_highpass_filter(cutoff_H, fs, order)
 
+  def _emit_cnn_progress(
+    done: int, total: int, phase: str, chunk_end: Optional[int] = None
+  ) -> None:
+    if progress_hook is None:
+      return
+    if chunk_end is not None:
+      try:
+        progress_hook(done, total, phase, chunk_end)
+        return
+      except TypeError:
+        pass
+    try:
+      progress_hook(done, total, phase)
+    except TypeError:
+      progress_hook(done, total)
+
+  def _resolve_from_path_cell(path_cell) -> Optional[Path]:
+    if path_cell is None:
+      return None
+    raw = str(path_cell).strip()
+    if not raw:
+      return None
+    p = Path(raw)
+    if p.exists():
+      return p
+    # Try resolving relative workbook-style path: USV_Recordings/<year>/...
+    if year_audio_root is not None and not p.is_absolute():
+      parts = list(p.parts)
+      if len(parts) >= 2 and parts[0].lower() == "usv_recordings":
+        y = str(year).strip()
+        if len(parts) >= 2 and parts[1] == y:
+          rel_tail = Path(*parts[2:]) if len(parts) > 2 else Path()
+          q = year_audio_root / rel_tail
+          if q.exists():
+            return q
+      q = year_audio_root / p
+      if q.exists():
+        return q
+    return None
 
   samples = []
   sr = 250000
@@ -84,55 +130,78 @@ def Syl_Class_Vec(
   finish_arr = np.array(finish)
   time_diff = np.subtract(finish_arr, start_arr) #calculating each syllable length
   
-  # First pass: count unique recordings that actually exist
+  n_mother = len(mother)
+  # First pass: count unique recordings that actually exist (light; progress for huge tables)
   existing_recordings = set()
-  for j in range(len(mother)):
-    if resolve_recording_wav(
-        year, mother[j], matgen[j], name[j], pupgen[j], age[j], session[j], rec_num[j],
-        year_folder=year_audio_root,
-    ) is not None:
-      existing_recordings.add((name[j], rec_num[j]))
+  if progress_hook is not None and n_mother > 0:
+    _emit_cnn_progress(0, n_mother, "resolve_paths")
+  for j in range(n_mother):
+    resolved = _resolve_from_path_cell(wav_paths[j]) if (wav_paths is not None and j < len(wav_paths)) else None
+    if resolved is None:
+      resolved = resolve_recording_wav(
+          year, mother[j], matgen[j], name[j], pupgen[j], age[j], session[j], rec_num[j],
+          year_folder=year_audio_root,
+      )
+    if resolved is not None:
+      existing_recordings.add((str(resolved), rec_num[j]))
+    if progress_hook is not None and n_mother > 0:
+      step = j + 1
+      if step == 1 or step == n_mother or step % 500 == 0:
+        _emit_cnn_progress(step, n_mother, "resolve_paths")
   
   total_recordings = len(existing_recordings)
   processed_recordings = set()
   processed_count = 0
-  
-  n_mother = len(mother)
+  loaded_rec = None
+  loaded_rate = sr
+  loaded_path = ""
+
+  if progress_hook is not None and n_mother > 0:
+    _emit_cnn_progress(0, n_mother, "spectrograms")
+
   for i in range(n_mother):
-    resolved = resolve_recording_wav(
-        year, mother[i], matgen[i], name[i], pupgen[i], age[i], session[i], rec_num[i],
-        year_folder=year_audio_root,
-    )
+    resolved = _resolve_from_path_cell(wav_paths[i]) if (wav_paths is not None and i < len(wav_paths)) else None
+    if resolved is None:
+      resolved = resolve_recording_wav(
+          year, mother[i], matgen[i], name[i], pupgen[i], age[i], session[i], rec_num[i],
+          year_folder=year_audio_root,
+      )
     if resolved is None:
       if logger:
         logger.warning(f"Recording file not found: {name[i]}, rec_num {rec_num[i]}, skipping syllable")
-      if progress_hook is not None:
-        progress_hook(i + 1, n_mother)
+      _emit_cnn_progress(i + 1, n_mother, "spectrograms")
       continue
     path = str(resolved)
-    if i>0 and (rec_num[i] != rec_num[i-1] or name[i] != name[i-1]):
+    prev_path = str(wav_paths[i-1]).strip() if (wav_paths is not None and i - 1 < len(wav_paths)) else ""
+    curr_path = str(wav_paths[i]).strip() if (wav_paths is not None and i < len(wav_paths)) else ""
+    changed_rec = rec_num[i] != rec_num[i-1] or name[i] != name[i-1] or (curr_path and prev_path and curr_path != prev_path)
+    if i>0 and changed_rec:
       recording = sample(mother[i-1], name[i-1], sex[i-1], age[i-1], matgen[i-1], pupgen[i-1], rec_num[i-1], pred, timeB)
       samples.append(recording)
       pred = []
       timeB = []
     
     # Log when we start processing a new recording
-    rec_key = (name[i], rec_num[i])
+    rec_key = (path, rec_num[i])
     if rec_key not in processed_recordings:
       processed_recordings.add(rec_key)
       processed_count = len(processed_recordings)
       if logger:
         percentage = (processed_count / total_recordings * 100) if total_recordings > 0 else 0
         logger.info(f"Processing recording {processed_count}/{total_recordings} ({percentage:.1f}%): {name[i]}, rec_num {rec_num[i]}")
+    if path != loaded_path:
+      loaded_rec, loaded_rate = librosa.load(path, sr=sr)  # librosa 0.10+: sr is keyword-only
+      loaded_path = path
+    rec = loaded_rec
+    rate = loaded_rate
+
     if time_diff[i] < max_time:
-      rec, rate = librosa.load(path, sr=sr)  # librosa 0.10+: sr is keyword-only
       temp = (max_time - time_diff[i])/2
       silence = np.zeros(round((temp)*rate))
       trimmed = rec[round((start[i])*rate):round((finish[i])*rate)] #trimming the syllables according to start and fin poitns from excel
       syl = np.append(silence, trimmed) #normalizing length to max syllable
       syl = np.append(syl, silence)
     else:
-      rec, rate = librosa.load(path, sr=sr)
       syl = rec[round((start[i])*rate):round((finish[i])*rate)]
     #pre processing
     syl = lfilter(d, c, syl) #hpf
@@ -144,27 +213,68 @@ def Syl_Class_Vec(
     D = D.astype('float32')
     D = D/255
     D = image.img_to_array(D)
-    D = np.expand_dims(D, axis=0)
-    predict = model.predict(D, verbose=0)
-    pred.append(predict)
+    pred.append(D)
     if len(pred) > 1:
       timeB.append(start[i] - finish[i-1])
-    if progress_hook is not None:
-      progress_hook(i + 1, n_mother)
+    _emit_cnn_progress(i + 1, n_mother, "spectrograms")
 
   # Don't forget the last recording
   if len(pred) > 0:
     recording = sample(mother[-1], name[-1], sex[-1], age[-1], matgen[-1], pupgen[-1], rec_num[-1], pred, timeB)
     samples.append(recording)
     # Add last recording to processed set if not already there
-    last_rec_key = (name[-1], rec_num[-1])
+    last_path = str(wav_paths[-1]).strip() if (wav_paths is not None and len(wav_paths) > 0) else name[-1]
+    last_rec_key = (last_path, rec_num[-1])
     if last_rec_key not in processed_recordings:
       processed_recordings.add(last_rec_key)
       processed_count = len(processed_recordings)
       if logger:
-        total_estimated = len(set((name[j], rec_num[j]) for j in range(len(mother))))
+        if wav_paths is not None and len(wav_paths) == len(mother):
+          total_estimated = len(set((str(wav_paths[j]).strip(), rec_num[j]) for j in range(len(mother))))
+        else:
+          total_estimated = len(set((name[j], rec_num[j]) for j in range(len(mother))))
         percentage = (processed_count / total_estimated * 100) if total_estimated > 0 else 0
         logger.info(f"Processing recording {processed_count}/{total_estimated} ({percentage:.1f}%): {name[-1]}, rec_num {rec_num[-1]}")
   
+  # Stack all syllable tensors, then ``model.predict`` in chunks. Large chunks keep GPU busy;
+  # for small jobs (few syllables) use a small chunk so progress_hook can show 1/N … N/N like
+  # the spectrogram phase instead of jumping straight to N/N in one step.
+  nonempty_samples = [r for r in samples if len(r.syls) > 0]
+  flat_specs: List = []
+  spans: List[Tuple[Any, int, int]] = []
+  off = 0
+  for rec_obj in nonempty_samples:
+    nloc = len(rec_obj.syls)
+    flat_specs.extend(rec_obj.syls)
+    spans.append((rec_obj, off, off + nloc))
+    off += nloc
+  n_flat = off
+  if n_flat > 0:
+    if n_flat <= 128:
+      infer_chunk = max(1, n_flat // 10)
+    else:
+      base = max(256, min(_GLOBAL_INFERENCE_CHUNK, n_flat))
+      # Large jobs: cap chunk so (a) the UI updates often and (b) we do not sit on
+      # ``Classify 0/N`` for hours while the first 2048-syllable ``predict`` runs.
+      if n_flat > 8000:
+        base = min(base, 384)
+      elif n_flat > 2000:
+        base = min(base, 512)
+      infer_chunk = base
+    y_parts = []
+    for s0 in range(0, n_flat, infer_chunk):
+      s1 = min(s0 + infer_chunk, n_flat)
+      _emit_cnn_progress(s0, n_flat, "predict_chunk", s1)
+      xb = np.stack(flat_specs[s0:s1], axis=0).astype(np.float32)
+      y_parts.append(
+          model.predict(xb, verbose=0, batch_size=_PREDICT_BATCH_SIZE)
+      )
+      _emit_cnn_progress(s1, n_flat, "predict")
+      if n_flat > 4000:
+        gc.collect()
+    y_all = np.concatenate(y_parts, axis=0)
+    for rec_obj, a, b in spans:
+      rec_obj.syls = y_all[a:b]
+
   samples = np.array(samples)
   return samples

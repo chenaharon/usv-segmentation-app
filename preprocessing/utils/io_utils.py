@@ -325,6 +325,66 @@ def build_sex_lookup_from_pup_summary_xlsx(metadata_path: str) -> Dict[Tuple[str
     return out
 
 
+def _find_first_matching_column(df: pd.DataFrame, aliases: Tuple[str, ...]) -> Optional[str]:
+    wanted = {_header_match_key(a) for a in aliases}
+    for c in df.columns:
+        if _header_match_key(c) in wanted:
+            return str(c)
+    return None
+
+
+def normalize_supplement_cell(value: Any) -> Optional[int]:
+    """Map supplement labels to 1/0, None when unknown/empty."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    s = str(value).strip()
+    if not s:
+        return None
+    low = s.lower()
+    if low in ("0", "false", "no", "none", "ללא תיסוף"):
+        return 0
+    if low in ("1", "true", "yes", "עם תיסוף"):
+        return 1
+    return None
+
+
+def build_pup_summary_details_lookup_xlsx(metadata_path: str) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """
+    Load a pup-summary workbook and return details by (mother, normalized name).
+
+    Details include normalized sex, offspring genotype and supplement flag when available.
+    """
+    from .audio_paths import pup_identity_key
+
+    df = _read_excel_with_header_detection(
+        metadata_path,
+        PUP_SUMMARY_REQUIRED_COLUMNS,
+    )
+    df = normalize_metadata_columns(df)
+    if not all(c in df.columns for c in PUP_SUMMARY_REQUIRED_COLUMNS):
+        return {}
+
+    supp_col = _find_first_matching_column(df, ("Supplements", "Supplement", "SUPP", "SUP"))
+    out: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        m = str(row["Mother"]).strip()
+        n = str(row["Name"]).strip()
+        if not m or not n or m.lower() in ("nan", "none") or n.lower() in ("nan", "none"):
+            continue
+        mu = m.upper()
+        nk = pup_identity_key(n)
+        detail = {
+            "sex": normalize_sex_cell(row["Sex"]),
+            "offspring_genotype": str(row.get("Offspring Genotype", "")).strip(),
+            "supplement": normalize_supplement_cell(row[supp_col]) if supp_col else None,
+        }
+        out[(mu, nk)] = detail
+        out[(m, n)] = detail
+    return out
+
+
 # Column names for segmentation results Excel file
 # These are the metadata columns plus segmentation-specific columns
 SEGMENTATION_RESULT_COLUMNS = METADATA_REQUIRED_COLUMNS + [

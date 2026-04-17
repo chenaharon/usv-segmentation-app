@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
+import os
+import sys
 
 datas = [('preprocessing', 'preprocessing'), ('models', 'models'), ('assets', 'assets')]
 binaries = []
@@ -12,6 +14,13 @@ tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('CTkMessagebox')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+# Use .ico on Windows only; macOS can use the default bundle icon in this spec.
+app_icon = None
+if sys.platform.startswith("win"):
+    ico_path = os.path.join("assets", "app_icon.ico")
+    if os.path.exists(ico_path):
+        app_icon = ico_path
 
 
 a = Analysis(
@@ -42,8 +51,8 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='SegmentationAppPortable',
-    icon='assets/app_icon.ico',
+    name='USV Segmentation (v1.0.0)',
+    icon=app_icon,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

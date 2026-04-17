@@ -106,18 +106,25 @@ def compute_basic_features(
     
     workbook = openpyxl.load_workbook(file_path)
     worksheet = workbook.worksheets[0]
+    # Canonical data row count from segmentation table (exclude header).
+    # Guard against accidental row inflation from mismatched feature vectors.
+    target_rows = max(0, worksheet.max_row - 1)
     
     column_names = ['ISI_time', 'Start Point (Hz)', 'End Point (Hz)']
     data_lists = [ISI, startF, endF]
     
     next_new = worksheet.max_column + 1
     for col_name, data in zip(column_names, data_lists):
+        # Write exactly one value per segmentation row.
+        vals = list(data[:target_rows])
+        if len(vals) < target_rows:
+            vals.extend([None] * (target_rows - len(vals)))
         col = _find_column(worksheet, col_name)
         if col is None:
             col = next_new
             next_new += 1
         worksheet.cell(row=1, column=col).value = col_name
-        for row_idx, value in enumerate(data, start=2):
+        for row_idx, value in enumerate(vals, start=2):
             worksheet.cell(row=row_idx, column=col).value = value
     
     workbook.save(file_path)

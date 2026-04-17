@@ -10,7 +10,7 @@ from utils import SEGMENTATION_RESULT_COLUMNS
 def read_segmentation_results(
     file_path: str,
     logger: Optional[logging.Logger] = None,
-) -> Tuple[List, List, List, List, List, List, List, List, List, List]:
+) -> Tuple[List, List, List, List, List, List, List, List, List, List, List]:
     """
     Read segmentation results from Excel file.
     
@@ -22,8 +22,8 @@ def read_segmentation_results(
         logger: Optional logger instance for logging
     
     Returns:
-        Tuple of 10 lists in this order:
-        (mother, matgen, name, sex, pupgen, age, session, rec_num, start, end)
+        Tuple of 11 lists in this order:
+        (path, mother, matgen, name, sex, pupgen, age, session, rec_num, start, end)
     
     Raises:
         FileNotFoundError: If the file doesn't exist
@@ -44,6 +44,7 @@ def read_segmentation_results(
         )
     
     # Extract columns in the order they will be returned
+    path_col = df["Path"].tolist() if "Path" in df.columns else ["" for _ in range(len(df))]
     mother = df['Mother'].tolist()
     matgen = df['Mother Genotype'].tolist()
     name = df['Name'].tolist()
@@ -59,5 +60,5 @@ def read_segmentation_results(
     if logger:
         logger.debug(f"Read {num_rows} rows from segmentation file")
     
-    return (mother, matgen, name, sex, pupgen, age, session, rec_num, start, end)
+    return (path_col, mother, matgen, name, sex, pupgen, age, session, rec_num, start, end)
 

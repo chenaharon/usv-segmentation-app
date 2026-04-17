@@ -1,51 +1,184 @@
 # USV Segmentation Desktop (`segmentation-app`)
 
-Desktop pipeline for mouse USV recordings: segmentation, basic features, syllable classification (CNN), and enriched Excel output.
+Desktop application for processing mouse USV recordings end-to-end:
 
-## Relation to `mouse-usv-asd-pipeline`
+- recording discovery from folder trees
+- metadata matching (including flexible column aliases)
+- syllable segmentation
+- feature enrichment
+- optional CNN-based syllable classification
+- export of rich Excel outputs and run summaries
 
-The repository **mouse-usv-asd-pipeline** is used only as a **reference** for behavior and step order. **This app does not modify that project.**  
-When comparing preprocessing logic, treat `mouse-usv-asd-pipeline/src/preprocessing` as read-only; apply any fixes only under `segmentation-app/preprocessing`.
+This repository is focused on the desktop app experience (`app.py`) and the orchestration engine (`pipeline.py`).
 
-| Step | mouse-usv-asd-pipeline (`run_pipeline.py`) | segmentation-app |
-|------|---------------------------------------------|------------------|
-| Load metadata + WAVs | `prepare_recording_metadata` | `pipeline.py` (client folder, classic `metadata/` + `USV_Recordings/`, or WAV scan) |
-| Segmentation | `run_segmentation` | In-process workbook + `segment_single_recording` |
-| Read rows | `read_segmentation_results` | Same module |
-| ISI + start/end frequency | `compute_basic_features` | Same (can load audio per recording to save RAM) |
-| CNN classification | `run_classification` | Same (`Syl_Class_Vec` with `recordings_search_root`) |
-| Enriched columns | `enrich_segmentation_columns` | Same |
-| Per-file CSV features | `run_feature_extraction` | **Not** part of the default GUI pipeline (optional offline) |
-| Aggregate `all_data.*` | `run_aggregated_feature_extraction` | **Not** in app default flow |
+## Table of contents
 
-## Folder layouts
+- [Quick start](#quick-start)
+- [What the app does](#what-the-app-does)
+- [Input data layouts](#input-data-layouts)
+- [Outputs](#outputs)
+- [Model weights](#model-weights)
+- [Programmatic API](#programmatic-api)
+- [Project structure](#project-structure)
+- [Documentation map](#documentation-map)
 
-- **Client / year folder:** `2015/*.xlsx` metadata + tree `Mother_Genotype/Name_Genotype/day_n/sessionN/rec.wav` under the same year folder.
-- **Classic dataset:** `metadata/*.xlsx` + `USV_Recordings/<year>/...`.
+## Quick start
 
-## Running
+### Run from source
 
-- **Developer:** `pip install -r requirements.txt`, then `python app.py`.
-- **Programmatic:** `from pipeline import execute_pipeline` — returns `(primary_xlsx_path, RunSummary)`; optional kwargs: `output_dir`, `years`, `want_syllables_xlsx`, `want_metadata_xlsx`, `metadata_only`. `RunSummary.output_directory` is the resolved output folder. Progress callback: `(progress, message, eta_seconds=None)`.
-- **Packaged:** see `docs/BUILD.md` (Windows portable + installer, macOS `.app`).
+```bash
+pip install -r requirements.txt
+python app.py
+```
+
+### Build distributables
+
+See `docs/BUILD.md` for:
+
+- Windows portable EXE
+- Windows installer (Inno Setup)
+- macOS `.app` bundle
+
+## What the app does
+
+The app processes one or more selected years and can run in different modes:
+
+- **Segmentation + Classification**: full flow including CNN label assignment.
+- **Segmentation**: segmentation and derived columns, without CNN classes.
+- **With Recordings Files Scan**: also emits inventory workbook for resolved recordings.
+- **Only Recordings Files Scan**: scans recordings and metadata mapping only (no segmentation).
+
+The UI supports:
+
+- per-year selection
+- nested per-folder filtering (checkbox tree)
+- optional manual metadata workbook override per year
+- real-time progress, elapsed time, and logs
+- results and outputs browsers
+
+## Input data layouts
+
+The pipeline supports multiple layouts.
+
+### 1) Client year-folder layout
+
+Example:
+
+```
+2023/
+  metadata_file.xlsx
+  Mother_Genotype/
+    Pup_Genotype/
+      day_6/
+        session2/
+          T0000054.wav
+```
+
+### 2) Classic dataset layout
+
+Example:
+
+```
+metadata/
+  Metadata Recording Mapping (2023).xlsx
+USV_Recordings/
+  2023/
+    Mother_Genotype/
+      Pup_Genotype/
+        day_6/
+          session2/
+            T0000054.wav
+```
+
+### Metadata columns
+
+Canonical required columns:
+
+- `Mother`
+- `Mother Genotype`
+- `Name`
+- `Sex`
+- `Offspring Genotype`
+- `Day`
+- `Session`
+- `Recording Number`
+
+Aliases are supported (including common English/Hebrew variants such as `Gender`, `מין`, `מגדר`).
 
 ## Outputs
 
-Configurable in the UI (English):
+Timestamp format is:
 
-1. **Segmentation workbook** — syllable-level Excel (segmentation, features, CNN, enrich). When this is the only selection, the recording scan file is **not** written (inventory still runs internally as needed).
-2. **Recording scan workbook** — `recordings_metadata_<year>_<timestamp>.xlsx` with paths and status. Scan-only runs skip segmentation/CNN.
+`YYYY-MM-DD_HH-MM-SS`
 
-Timestamp in filenames uses the form `YYYY-MM-DD_HH-MM-SS` (e.g. `segmentation_2015_2026-03-28_19-30-53.xlsx`).
+Main outputs:
+
+- `segmentation_<year>_<timestamp>.xlsx` (or `segmentation_classification_...`)
+- merged multi-year workbook: `segmentation_*_Multiple_Years_<timestamp>.xlsx` (if relevant)
+- recording inventory: `recordings_metadata_<year>_<timestamp>.xlsx` (scan mode)
+- summary workbook: `<main_output_stem>_summary.xlsx`
+
+Summary columns include:
+
+- `Year`
+- `Total mice (pups)`
+- `Total recordings`
+- `Total syllables`
+- `Mice with syllables detected`
+- `Recordings with syllables`
 
 ## Model weights
 
-Place `model_weights.h6` under `models/` next to `app.py` / `pipeline.py` (or bundle in PyInstaller `datas`). The app resolves the model from the **install folder**, not from the current working directory, so runs from arbitrary folders (e.g. Downloads) still find it.
+Place CNN model under `models/` (bundled into desktop build), or override with:
 
-You can override with environment variable `USV_MODEL_PATH` (full path to `model_weights.h6`, or to a folder that contains it).
+- `USV_MODEL_PATH` = absolute path to model folder/file
 
-If the file is missing or classification fails, syllable numbers fall back to class `10` (undefined).
+If model loading fails, classification falls back to class `10`.
 
-## Metadata Excel columns
+## Programmatic API
 
-Required columns match `METADATA_REQUIRED_COLUMNS` in `preprocessing/utils/io_utils.py`. If your sheet uses **Gender** / **gender** (or Hebrew **מין** / **מגדר**) instead of **Sex**, it is normalized automatically when reading.
+Use the pipeline without UI:
+
+```python
+from pipeline import execute_pipeline
+
+primary_output, summary = execute_pipeline(
+    folder_path="path/to/data",
+    progress_callback=lambda p, msg, eta=None: print(f"{p:.1%} {msg}"),
+    output_dir="outputs",
+    years=["2015", "2018"],
+    want_syllables_xlsx=True,
+    want_metadata_xlsx=True,
+    metadata_only=False,
+    run_classification=True,
+)
+```
+
+Returns:
+
+- `primary_output`: primary generated workbook path
+- `summary`: `RunSummary` with counters, output list, and errors
+
+## Project structure
+
+```text
+segmentation-app/
+  app.py                       # Desktop UI
+  pipeline.py                  # Multi-year orchestration engine
+  metadata_export.py           # Inventory + summary workbook writers
+  preprocessing/
+    steps/                     # Pipeline processing stages
+    utils/                     # I/O, path matching, metadata normalization
+    legacy/                    # Legacy research computation modules
+  docs/
+    BUILD.md                   # Packaging/build instructions
+```
+
+## Documentation map
+
+- `docs/USER_GUIDE.md` - UI usage walkthrough
+- `docs/ARCHITECTURE.md` - module architecture and execution model
+- `docs/PIPELINE_REFERENCE.md` - pipeline stages, inputs/outputs, and key data models
+- `docs/DEVELOPMENT.md` - development workflow, code conventions, and release checklist
+- `docs/TROUBLESHOOTING.md` - common failures and diagnostics
+- `docs/BUILD.md` - packaging for Windows and macOS

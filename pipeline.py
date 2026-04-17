@@ -9,11 +9,16 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import librosa
 
-from metadata_export import MetadataRow, merge_syllable_counts_from_excel, save_metadata_inventory
+from metadata_export import (
+    MetadataRow,
+    merge_syllable_counts_from_excel,
+    save_metadata_inventory,
+    save_processing_summary_workbook,
+)
 
 
 ProgressFn = Callable[..., None]
@@ -35,6 +40,16 @@ class RunSummary:
     classification_model_path: Optional[str] = None
     output_directory: Optional[str] = None
 
+    @property
+    def recordings_with_syllables_in_output(self) -> int:
+        """Successful segmentations that produced at least one syllable row in the workbook."""
+        return max(0, self.wav_segmentation_succeeded - self.recordings_with_zero_syllables)
+
+    @property
+    def recordings_without_syllable_rows(self) -> int:
+        """No rows in output: zero syllables after OK segmentation, or segmentation error."""
+        return self.recordings_with_zero_syllables + self.wav_segmentation_failed
+
     def merge(self, other: "RunSummary") -> None:
         self.metadata_rows_scanned += other.metadata_rows_scanned
         self.wav_files_found += other.wav_files_found
@@ -55,14 +70,16 @@ class RunSummary:
             "Run summary",
             f"  Years processed: {', '.join(self.years_processed) or '(none)'}",
             f"  Metadata rows scanned: {self.metadata_rows_scanned}",
-            f"  WAV files resolved: {self.wav_files_found}",
+            f"  Recording files resolved: {self.wav_files_found}",
             f"  Segmentation OK: {self.wav_segmentation_succeeded}",
             f"  Segmentation failed: {self.wav_segmentation_failed}",
             f"  Recordings with 0 syllables: {self.recordings_with_zero_syllables}",
+            f"  Record files with syllables in output: {self.recordings_with_syllables_in_output}",
+            f"  Record files with no syllable rows: {self.recordings_without_syllable_rows}",
             f"  Total syllable rows: {self.total_syllable_rows}",
         ]
         if self.classification_model_path:
-            lines.append(f"  CNN model file: {self.classification_model_path}")
+            lines.append(f"  Classification model file: {self.classification_model_path}")
         if self.output_files:
             lines.append("  Outputs:")
             for p in self.output_files:
@@ -76,6 +93,59 @@ class RunSummary:
         return "\n".join(lines)
 
 
+def _syllable_count_from_meta_row(r: MetadataRow) -> int:
+    c = r.syllable_count
+    if c is None:
+        return 0
+    try:
+        return max(0, int(c))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _inventory_year_summary_row(inv: List[MetadataRow], year: str) -> Dict[str, Any]:
+    """One summary row for ``save_processing_summary_workbook`` (English keys)."""
+    y = str(year).strip()
+    rows = [r for r in inv if str(r.year).strip() == y]
+    if not rows:
+        return {
+            "Year": y,
+            "Total mice (pups)": 0,
+            "Total recordings": 0,
+            "Total syllables": 0,
+            "Mice with syllables detected": 0,
+            "Recordings with syllables": 0,
+        }
+    from utils.audio_paths import pup_identity_key  # type: ignore
+
+    def pup_key(r: MetadataRow) -> Optional[Tuple[str, str]]:
+        n = str(r.name).strip()
+        if not n:
+            return None
+        return (str(r.mother).strip().upper(), pup_identity_key(n))
+
+    pups: Set[Tuple[str, str]] = set()
+    pups_syl: Set[Tuple[str, str]] = set()
+    for r in rows:
+        k = pup_key(r)
+        if k is not None:
+            pups.add(k)
+            if _syllable_count_from_meta_row(r) > 0:
+                pups_syl.add(k)
+
+    rec_syl = sum(1 for r in rows if _syllable_count_from_meta_row(r) > 0)
+    total_syllables = sum(_syllable_count_from_meta_row(r) for r in rows)
+
+    return {
+        "Year": y,
+        "Total mice (pups)": len(pups),
+        "Total recordings": len(rows),
+        "Total syllables": total_syllables,
+        "Mice with syllables detected": len(pups_syl),
+        "Recordings with syllables": rec_syl,
+    }
+
+
 @dataclass
 class PipelineOptions:
     root_folder: str
@@ -84,8 +154,11 @@ class PipelineOptions:
     want_syllables_xlsx: bool = True
     want_metadata_xlsx: bool = True
     metadata_only: bool = False
+    run_classification: bool = True
     # year (string) -> list of relative POSIX paths under that year folder; empty/omit = no filter
     subfolder_filters: Optional[Dict[str, List[str]]] = None
+    # year (string) -> explicit metadata workbook path selected by the user
+    metadata_file_overrides: Optional[Dict[str, str]] = None
 
 
 def _emit_progress(
@@ -106,10 +179,111 @@ def output_timestamp_suffix(when: Optional[datetime] = None) -> str:
     return dt.strftime("%Y-%m-%d_%H-%M-%S")
 
 
+def _is_per_year_segmentation_xlsx(path: str) -> bool:
+    n = Path(path).name
+    return (
+        n.startswith("segmentation_")
+        and n.endswith(".xlsx")
+        and "Multiple_Years" not in n
+    )
+
+
+def _is_segmentation_workbook_path(path: str) -> bool:
+    """Main segmentation output (excludes ``*_summary.xlsx`` workbooks)."""
+    n = Path(path).name.lower()
+    return n.startswith("segmentation_") and n.endswith(".xlsx") and not n.endswith("_summary.xlsx")
+
+
+def _segmentation_workbook_for_summary_name(output_files: List[str]) -> Optional[Path]:
+    """Latest segmentation workbook path to derive ``<stem>_summary.xlsx`` (after multi-year merge)."""
+    for p in reversed(output_files):
+        if _is_segmentation_workbook_path(p):
+            return Path(p)
+    return None
+
+
+def _metadata_workbook_for_summary_name(output_files: List[str]) -> Optional[Path]:
+    """Fallback when no segmentation file: pair summary name with last metadata inventory."""
+    for p in reversed(output_files):
+        path = Path(p)
+        n = path.name.lower()
+        if n.startswith("recordings_metadata_") and n.endswith(".xlsx") and not n.endswith("_summary.xlsx"):
+            return path
+    return None
+
+
+def _ordered_unique_per_year_segmentation_paths(paths: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for p in paths:
+        if not _is_per_year_segmentation_xlsx(p):
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def _renumber_index_column_in_worksheet(ws) -> None:
+    """Set the ``Index`` column to 1..N for every data row (row 2 onward)."""
+    if ws.max_row is None or ws.max_row < 2:
+        return
+    headers = [c.value for c in ws[1]]
+    col_idx = None
+    for i, h in enumerate(headers):
+        if h is not None and str(h).strip().lower() == "index":
+            col_idx = i + 1
+            break
+    if col_idx is None:
+        return
+    serial = 1
+    for row in range(2, ws.max_row + 1):
+        ws.cell(row=row, column=col_idx).value = serial
+        serial += 1
+
+
+def _merge_segmentation_workbooks(source_paths: List[str], dest: Path) -> str:
+    """
+    Use the first workbook as the base (header + first year's rows), append data rows
+    from the remaining files (from row 2 onward), renumber ``Index`` to one contiguous
+    1-based series, then save to dest.
+    """
+    from openpyxl import load_workbook
+
+    if len(source_paths) < 2:
+        raise ValueError("merge requires at least two source workbooks")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    wb_out = load_workbook(source_paths[0])
+    ws_out = wb_out.active
+    for src in source_paths[1:]:
+        wb = load_workbook(src, read_only=True, data_only=True)
+        try:
+            ws = wb.active
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row is None:
+                    continue
+                cells = list(row)
+                if not cells or all(v is None or v == "" for v in cells):
+                    continue
+                ws_out.append(cells)
+        finally:
+            wb.close()
+    _renumber_index_column_in_worksheet(ws_out)
+    wb_out.save(str(dest))
+    return str(dest.resolve())
+
+
 def _is_generated_pipeline_xlsx(path: Path) -> bool:
     """True if the filename looks like an app output workbook (not lab source metadata)."""
     stem_l = path.stem.lower()
-    return stem_l.startswith("recordings_metadata_") or stem_l.startswith("segmentation_")
+    name_l = path.name.lower()
+    return (
+        stem_l.startswith("recordings_metadata_")
+        or stem_l.startswith("segmentation_")
+        or stem_l.startswith("processing_summary_")
+        or name_l.endswith("_summary.xlsx")
+    )
 
 
 def _is_source_excel_file(path: Path) -> bool:
@@ -146,6 +320,28 @@ def _candidate_source_excels_under(selected: Path) -> List[Path]:
     return found
 
 
+def _candidate_source_excels_near_year(selected: Path) -> List[Path]:
+    """
+    Candidate Excel files under the year folder itself or exactly one subdirectory below it.
+    """
+    sel = selected.resolve()
+    found: List[Path] = []
+    try:
+        for pattern in ("*.xlsx", "*.xls"):
+            for p in sel.glob(pattern):
+                if _is_source_excel_file(p):
+                    found.append(p)
+            for d in sel.iterdir():
+                if not d.is_dir() or d.name in _SKIP_DISCOVERY_DIR_NAMES:
+                    continue
+                for p in d.glob(pattern):
+                    if _is_source_excel_file(p):
+                        found.append(p)
+    except OSError:
+        pass
+    return sorted(set(found), key=lambda p: str(p).lower())
+
+
 def year_metadata_availability(year_path: Path) -> bool:
     """
     UI hint: True if the year folder contains at least one source Excel file (``.xlsx`` / ``.xls``).
@@ -155,7 +351,7 @@ def year_metadata_availability(year_path: Path) -> bool:
     This does not validate column headers; the pipeline still enforces that at runtime.
     """
     year_path = year_path.resolve()
-    for p in _candidate_source_excels_under(year_path):
+    for p in _candidate_source_excels_near_year(year_path):
         if _is_source_excel_file(p):
             return True
     return False
@@ -206,7 +402,7 @@ def wav_matches_subfolder_prefixes(
     """
     * ``prefixes is None``: no restriction (process all).
     * ``prefixes == []``: explicit exclusion (match nothing).
-    * Otherwise the WAV must lie under the year folder such that at least one relative
+    * Otherwise the recording file must lie under the year folder such that at least one relative
       path matches a normalized prefix (folder tree selection in the UI).
     """
     if prefixes is None:
@@ -230,7 +426,7 @@ def wav_matches_subfolder_prefixes(
 
 
 def _wav_log_path(wav: Path) -> str:
-    """Full path for progress logs (WAV basenames repeat across folders)."""
+    """Full path for progress logs (basenames repeat across folders)."""
     try:
         return str(wav.resolve())
     except OSError:
@@ -261,9 +457,30 @@ def _add_preprocessing_to_path(preprocessing_dir: Path) -> None:
         sys.path.insert(0, path_str)
 
 
-def _scan_audio_files(root: Path) -> List[Path]:
+def _scan_audio_files(
+    root: Path,
+    *,
+    progress: Optional[ProgressFn] = None,
+    progress_p: float = 0.05,
+    year: str = "",
+) -> List[Path]:
+    """Collect supported recording files (currently ``.wav``/``.wave``) under ``root``; optional progress while walking."""
     wav_ext = {".wav", ".wave"}
-    return sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in wav_ext)
+    found: List[Path] = []
+    prefix = f"[{year}] " if year else ""
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            if Path(fn).suffix.lower() not in wav_ext:
+                continue
+            found.append(Path(dirpath) / fn)
+    if progress is not None:
+        _emit_progress(
+            progress,
+            progress_p,
+            f"{prefix}{len(found)} audio recordings found",
+            None,
+        )
+    return sorted(found, key=lambda p: str(p).lower())
 
 
 def _year_folder_name(selected: Path) -> str:
@@ -300,11 +517,19 @@ def _is_year_only_folder(path: Path) -> bool:
     return path.name.isdigit() and len(path.name) == 4
 
 
-def _find_metadata_workbooks_client_layout(selected: Path) -> List[Path]:
-    """Discover all lab metadata workbooks under the year folder (any depth)."""
+def _find_metadata_workbooks_client_layout(
+    selected: Path,
+    explicit_metadata_file: Optional[Path] = None,
+) -> List[Path]:
+    """Discover metadata workbooks under year root / one level below, or use explicit path."""
     sel = selected.resolve()
     out: List[Path] = []
-    for p in _candidate_source_excels_under(sel):
+    if explicit_metadata_file is not None:
+        p = explicit_metadata_file.resolve()
+        if _is_valid_metadata_workbook(p):
+            return [p]
+        return []
+    for p in _candidate_source_excels_near_year(sel):
         if _is_valid_metadata_workbook(p):
             out.append(p)
     return sorted(set(out), key=lambda p: str(p).lower())
@@ -341,23 +566,49 @@ def _is_pup_summary_workbook(path: Path) -> bool:
         return False
 
 
-def _find_pup_summary_workbooks(selected: Path) -> List[Path]:
-    """Pup-summary xlsx anywhere under the year folder (same discovery reach as metadata)."""
+def _find_pup_summary_workbooks(
+    selected: Path,
+    explicit_metadata_file: Optional[Path] = None,
+) -> List[Path]:
+    """Pup-summary xlsx under year root / one level below, or explicit path if provided."""
     sel = selected.resolve()
     out: List[Path] = []
-    for p in _candidate_source_excels_under(sel):
+    if explicit_metadata_file is not None:
+        p = explicit_metadata_file.resolve()
+        if _is_pup_summary_workbook(p):
+            return [p]
+        return []
+    for p in _candidate_source_excels_near_year(sel):
         if _is_pup_summary_workbook(p):
             out.append(p)
     return sorted(set(out), key=lambda p: str(p).lower())
 
 
-def _merge_sex_lookups_from_year_folder(selected: Path) -> Dict[Tuple[str, str], str]:
+def _merge_sex_lookups_from_year_folder(
+    selected: Path,
+    explicit_metadata_file: Optional[Path] = None,
+) -> Dict[Tuple[str, str], str]:
     from utils.io_utils import build_sex_lookup_from_pup_summary_xlsx  # type: ignore
 
     merged: Dict[Tuple[str, str], str] = {}
-    for p in _find_pup_summary_workbooks(selected):
+    for p in _find_pup_summary_workbooks(selected, explicit_metadata_file):
         try:
             merged.update(build_sex_lookup_from_pup_summary_xlsx(str(p)))
+        except Exception:
+            continue
+    return merged
+
+
+def _merge_pup_details_from_year_folder(
+    selected: Path,
+    explicit_metadata_file: Optional[Path] = None,
+) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    from utils.io_utils import build_pup_summary_details_lookup_xlsx  # type: ignore
+
+    merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for p in _find_pup_summary_workbooks(selected, explicit_metadata_file):
+        try:
+            merged.update(build_pup_summary_details_lookup_xlsx(str(p)))
         except Exception:
             continue
     return merged
@@ -367,16 +618,15 @@ def _resolve_sex_from_pup_tables(
     mother: str,
     name_from_path: str,
     lookup: Dict[Tuple[str, str], str],
+    *,
+    extra_name_hints: Optional[List[str]] = None,
 ) -> str:
-    from utils.audio_paths import pup_identity_key  # type: ignore
+    from utils.audio_paths import iter_pup_table_lookup_keys  # type: ignore
 
     if not lookup:
         return _guess_sex(name_from_path)
-    m = str(mother).strip()
-    mu = m.upper()
-    raw = str(name_from_path).strip()
-    nk = pup_identity_key(raw)
-    for k in ((mu, nk), (m, raw), (mu, raw)):
+    hints = [name_from_path] + list(extra_name_hints or [])
+    for k in iter_pup_table_lookup_keys(mother, *hints):
         if k in lookup:
             return lookup[k]
     return _guess_sex(name_from_path)
@@ -387,13 +637,63 @@ def _excel_sex_with_pup_fallback(
     mother: str,
     name_key: str,
     lookup: Dict[Tuple[str, str], str],
+    *,
+    extra_name_hints: Optional[List[str]] = None,
 ) -> str:
     from utils.io_utils import normalize_sex_cell  # type: ignore
 
     sx = normalize_sex_cell(excel_sx)
     if sx != "U":
         return sx
-    return _resolve_sex_from_pup_tables(mother, name_key, lookup)
+    return _resolve_sex_from_pup_tables(
+        mother, name_key, lookup, extra_name_hints=extra_name_hints
+    )
+
+
+def _pup_path_hints_for_wav(selected: Path, wav: Path) -> List[str]:
+    raw = _raw_pup_folder_from_path(selected, wav)
+    if not raw:
+        return []
+    from utils.audio_paths import canonical_pup_display_name  # type: ignore
+
+    cd = canonical_pup_display_name(raw)
+    out = [raw]
+    if cd and cd != raw:
+        out.append(cd)
+    return out
+
+
+def _output_pup_name_for_segmentation(selected: Path, wav: Path, excel_name: str) -> str:
+    """Prefer folder-based canonical name; fall back to metadata Name."""
+    from utils.audio_paths import canonical_pup_display_name  # type: ignore
+
+    raw = _raw_pup_folder_from_path(selected, wav)
+    if raw:
+        c = canonical_pup_display_name(raw)
+        if c:
+            return c
+    c2 = canonical_pup_display_name(excel_name)
+    return c2 or str(excel_name).strip() or "UnknownName"
+
+
+def _sex_for_metadata_row(
+    excel_sx: str,
+    mother: str,
+    excel_name: str,
+    lookup: Dict[Tuple[str, str], str],
+    selected: Path,
+    wav: Optional[Path],
+) -> str:
+    """Resolve sex using Excel cell first, then pup tables with path-aware hints."""
+    from utils.io_utils import normalize_sex_cell  # type: ignore
+
+    sx0 = normalize_sex_cell(excel_sx)
+    if sx0 != "U":
+        return sx0
+    hints = _pup_path_hints_for_wav(selected, wav) if wav is not None else []
+    return _resolve_sex_from_pup_tables(
+        mother, excel_name, lookup, extra_name_hints=hints
+    )
 
 
 def _resolve_dataset_and_metadata(selected: Path) -> Tuple[Optional[Path], Optional[Path]]:
@@ -510,6 +810,7 @@ def _resolve_model_path() -> Tuple[Optional[Path], List[str]]:
 
     candidates.extend(
         [
+            Path(sys.executable).resolve().parent / "models" / "model_weights.h6",
             app_root / "models" / "model_weights.h6",
             Path.cwd() / "models" / "model_weights.h6",
             base_dir / "models" / "model_weights.h6",
@@ -546,35 +847,46 @@ def _resolve_model_path() -> Tuple[Optional[Path], List[str]]:
 
 
 def _write_constant_syllable_column(file_path: str, value: int) -> None:
-    import openpyxl
+    import pandas as pd
 
-    wb = openpyxl.load_workbook(file_path)
-    ws = wb.worksheets[0]
-    col = ws.max_column + 1
-    ws.cell(row=1, column=col).value = "Syllable number"
-    for row in range(2, ws.max_row + 1):
-        ws.cell(row=row, column=col).value = value
-    wb.save(file_path)
+    df = pd.read_excel(file_path, sheet_name=0, engine="openpyxl")
+    df["Syllable number"] = int(value)
+    df.to_excel(file_path, index=False, engine="openpyxl")
 
 
 def _extract_row_metadata_from_path_layout(
     root: Path, wav_path: Path
 ) -> Tuple[str, str, str, str, str, int, int, str]:
-    rel = wav_path.relative_to(root)
-    parts = list(rel.parts)
-    folders = parts[:-1] if len(parts) > 1 else []
-    # Support nested-year wrapper: <selected>/<year>/<Mother_...>/<Name_...>/day_*/session*/file.wav
-    if len(folders) >= 5 and re.fullmatch(r"\d{4}", str(folders[0])):
-        folders = folders[1:]
+    folders = _extract_layout_folders(root, wav_path)
     stem = wav_path.stem
 
     mother, matgen = "UnknownMother", "UNK"
     name, pupgen = "UnknownName", "UNK"
     day, session = 0, 0
 
+    mother_idx = -1
+    for i, token in enumerate(folders):
+        if _is_mother_folder_token(token):
+            mother_idx = i
+            break
+    if mother_idx >= 0:
+        mother, matgen = _parse_mother_from_folder_token(folders[mother_idx])
+        if mother_idx + 1 < len(folders):
+            name, pupgen = _parse_pup_from_folder_token(folders[mother_idx + 1])
+        for token in folders[mother_idx + 1 :]:
+            low = token.lower().replace(" ", "_")
+            if day == 0 and low.startswith("day"):
+                day = _extract_number(token)
+            if session == 0 and low.startswith("session"):
+                session = _extract_number(token)
+        rec_num = stem
+        sex = _guess_sex(name)
+        return mother, matgen, name, sex, pupgen, day, session, rec_num
+
     if len(folders) >= 4:
         mother, matgen = _split_pair(folders[0], "UnknownMother", "UNK")
         name, pupgen = _split_pair(folders[1], "UnknownName", "UNK")
+        name = _normalize_pup_name_from_folder(name)
         day = _extract_number(folders[2])
         session = _extract_number(folders[3])
     elif len(folders) == 3:
@@ -584,6 +896,7 @@ def _extract_row_metadata_from_path_layout(
             session = _extract_number(folders[2])
         else:
             name, pupgen = _split_pair(folders[1], "UnknownName", "UNK")
+            name = _normalize_pup_name_from_folder(name)
             day = _extract_number(folders[2])
     elif len(folders) == 2:
         mother, matgen = _split_pair(folders[0], "UnknownMother", "UNK")
@@ -593,6 +906,7 @@ def _extract_row_metadata_from_path_layout(
             session = _extract_number(folders[1])
         else:
             name, pupgen = _split_pair(folders[1], "UnknownName", "UNK")
+            name = _normalize_pup_name_from_folder(name)
     elif len(folders) == 1:
         mother, matgen = _split_pair(folders[0], "UnknownMother", "UNK")
 
@@ -602,10 +916,122 @@ def _extract_row_metadata_from_path_layout(
 
 
 def _split_pair(value: str, default_left: str, default_right: str) -> Tuple[str, str]:
-    if "_" not in value:
+    raw = str(value).strip()
+    if not raw:
         return default_left, default_right
-    left, right = value.split("_", 1)
-    return left or default_left, right or default_right
+    parts = [p for p in re.split(r"[_\s]+", raw) if p]
+    if len(parts) >= 2:
+        geno = _extract_genotype_from_parts(parts)
+        return parts[0] or default_left, geno or default_right
+    if "_" in raw:
+        left, right = raw.split("_", 1)
+        return left or default_left, _normalize_genotype_token(right) or default_right
+    return raw or default_left, default_right
+
+
+def _normalize_genotype_token(token: str) -> str:
+    t = str(token).strip().upper().replace("-", "").replace("_", "")
+    if t in {"HET", "HT"}:
+        return "HT"
+    if t in {"WT", "WILDTYPE"} or re.fullmatch(r"(WT)+", t):
+        return "WT"
+    if re.fullmatch(r"(HET)+", t) or re.fullmatch(r"(HT)+", t):
+        return "HT"
+    if t in {"HOM", "KO", "KI"}:
+        return t
+    return t or "UNK"
+
+
+def _extract_genotype_from_parts(parts: List[str]) -> Optional[str]:
+    """Find first valid genotype token (WT/HT/HOM/KO/KI) in tokenized folder labels."""
+    for p in parts:
+        g = _normalize_genotype_token(p)
+        if g in {"WT", "HT", "HOM", "KO", "KI"}:
+            return g
+    return None
+
+
+def _normalize_pup_name_from_folder(value: str) -> str:
+    from utils.audio_paths import canonical_pup_display_name  # type: ignore
+
+    c = canonical_pup_display_name(value)
+    return c if c else "UnknownName"
+
+
+def _is_mother_folder_token(value: str) -> bool:
+    s = str(value).strip()
+    if not s:
+        return False
+    parts = [p for p in re.split(r"[_\s]+", s) if p]
+    if len(parts) < 2:
+        return False
+    return _extract_genotype_from_parts(parts) in {"WT", "HT", "HOM", "KO", "KI"}
+
+
+def _parse_mother_from_folder_token(value: str) -> Tuple[str, str]:
+    parts = [p for p in re.split(r"[_\s]+", str(value).strip()) if p]
+    if len(parts) >= 2:
+        return parts[0], (_extract_genotype_from_parts(parts) or "UNK")
+    return _split_pair(str(value), "UnknownMother", "UNK")
+
+
+def _parse_pup_from_folder_token(value: str) -> Tuple[str, str]:
+    from utils.audio_paths import canonical_pup_display_name  # type: ignore
+
+    s = str(value).strip()
+    if not s:
+        return "UnknownName", "UNK"
+    parts = [p for p in re.split(r"[_\s]+", s) if p]
+    geno = _extract_genotype_from_parts(parts)
+    if geno is not None:
+        name_parts = [
+            p for p in parts if _normalize_genotype_token(p) not in {"WT", "HT", "HOM", "KO", "KI"}
+        ]
+        base = "_".join(name_parts) if name_parts else s
+        return canonical_pup_display_name(base) or "UnknownName", geno
+    return canonical_pup_display_name(s) or "UnknownName", "UNK"
+
+
+def _extract_layout_folders(root: Path, wav_path: Path) -> List[str]:
+    rel = wav_path.relative_to(root)
+    parts = list(rel.parts)
+    folders = parts[:-1] if len(parts) > 1 else []
+    if len(folders) >= 5 and re.fullmatch(r"\d{4}", str(folders[0])):
+        folders = folders[1:]
+    return [str(x) for x in folders]
+
+
+def _raw_pup_folder_from_path(root: Path, wav_path: Path) -> str:
+    folders = _extract_layout_folders(root, wav_path)
+    if not folders:
+        return ""
+    mother_idx = -1
+    for i, token in enumerate(folders):
+        if _is_mother_folder_token(token):
+            mother_idx = i
+            break
+    if mother_idx >= 0 and mother_idx + 1 < len(folders):
+        return folders[mother_idx + 1]
+    if len(folders) >= 2:
+        return folders[1]
+    return ""
+
+
+def _resolve_pup_details(
+    mother: str,
+    raw_pup_folder: str,
+    normalized_name: str,
+    details_lookup: Dict[Tuple[str, str], Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    from utils.audio_paths import iter_pup_table_lookup_keys  # type: ignore
+
+    if not details_lookup:
+        return None
+    hints = [str(raw_pup_folder).strip(), str(normalized_name).strip()]
+    for k in iter_pup_table_lookup_keys(mother, *hints):
+        if k in details_lookup:
+            return details_lookup[k]
+    return None
 
 
 def _extract_number(value: str) -> int:
@@ -627,7 +1053,7 @@ def _classification_year_root(
     year: str,
     dataset_root: Optional[Path],
 ) -> Path:
-    """Directory that contains ``Mother_* / Name_* / day_* / session* / file.wav``."""
+    """Directory that contains ``Mother_* / Name_* / day_* / session* / recording file``."""
     if dataset_root is not None:
         p = (dataset_root / "USV_Recordings" / year).resolve()
         if p.is_dir():
@@ -674,7 +1100,7 @@ def _count_segmentable_client_metadata_rows(
     sex_lookup: Dict[Tuple[str, str], str],
     resolve_wav_path_fn,
 ) -> int:
-    """Rows that resolve to a WAV under the year and pass the subfolder filter (for ETA)."""
+    """Rows that resolve to a recording file under the year and pass the subfolder filter (for ETA)."""
     from utils import read_metadata_as_lists  # type: ignore
     from utils.audio_paths import resolve_wav_under_year_folder  # type: ignore
 
@@ -686,8 +1112,7 @@ def _count_segmentable_client_metadata_rows(
         except Exception:
             continue
         for i in range(len(data["Mother"])):
-            m, mg, n_, sx, pg, d, ses, rec = _meta_row(data, i)
-            sx = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
+            m, mg, n_, _, pg, d, ses, rec = _meta_row(data, i)
             if mf.parent.resolve() == sel_resolved:
                 wav = resolve_wav_under_year_folder(
                     sel_resolved, m, mg, n_, pg, d, ses, rec
@@ -724,8 +1149,7 @@ def _count_segmentable_usv_metadata_rows(
 
     n = 0
     for i in range(len(meta.get("Mother", []))):
-        m, mg, n_, sx, pg, d, ses, rec = _meta_row(meta, i)
-        sx = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
+        m, mg, n_, _, pg, d, ses, rec = _meta_row(meta, i)
         wav = resolve_wav_usv_recordings_layout(
             "USV_Recordings", year, m, mg, n_, pg, int(d), int(ses), rec
         )
@@ -754,6 +1178,7 @@ def collect_metadata_inventory_only(
     progress_base: float,
     progress_span: float,
     subfolder_prefixes: Optional[List[str]] = None,
+    explicit_metadata_file: Optional[Path] = None,
 ) -> Tuple[List[MetadataRow], RunSummary]:
     from utils import read_metadata_as_lists  # type: ignore
     from utils.audio_paths import resolve_wav_under_year_folder  # type: ignore
@@ -761,9 +1186,10 @@ def collect_metadata_inventory_only(
     summary = RunSummary()
     rows: List[MetadataRow] = []
     sel_resolved = selected.resolve()
-    client_metadata_files = _find_metadata_workbooks_client_layout(selected)
+    client_metadata_files = _find_metadata_workbooks_client_layout(selected, explicit_metadata_file)
     dataset_root, metadata_dir = _resolve_dataset_and_metadata(selected)
-    sex_lookup = _merge_sex_lookups_from_year_folder(selected)
+    sex_lookup = _merge_sex_lookups_from_year_folder(selected, explicit_metadata_file)
+    pup_details_lookup = _merge_pup_details_from_year_folder(selected, explicit_metadata_file)
 
     def add_row(
         mf_name: str,
@@ -825,7 +1251,6 @@ def collect_metadata_inventory_only(
             n = len(data["Mother"])
             for i in range(n):
                 m, mg, n_, sx, pg, d, ses, rec = _meta_row(data, i)
-                sx = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
                 if mf.parent.resolve() == sel_resolved:
                     wav = resolve_wav_under_year_folder(
                         sel_resolved, m, mg, n_, pg, d, ses, rec
@@ -835,8 +1260,12 @@ def collect_metadata_inventory_only(
                         mf.parent, m, mg, n_, pg, d, ses, rec, resolve_wav_path_fn
                     )
                 if wav is None:
-                    add_row(mf.name, m, mg, n_, sx, pg, d, ses, rec, None, "WAV not found")
+                    sx_o = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
+                    add_row(mf.name, m, mg, n_, sx_o, pg, d, ses, rec, None, "Recording file not found")
                 else:
+                    wav = wav.resolve()
+                    sx_o = _sex_for_metadata_row(sx, m, n_, sex_lookup, sel_resolved, wav)
+                    disp = _output_pup_name_for_segmentation(sel_resolved, wav, n_)
                     if _is_year_only_folder(selected):
                         try:
                             wav.relative_to(sel_resolved)
@@ -850,8 +1279,8 @@ def collect_metadata_inventory_only(
                             mf.name,
                             m,
                             mg,
-                            n_,
-                            sx,
+                            disp,
+                            sx_o,
                             pg,
                             d,
                             ses,
@@ -861,7 +1290,9 @@ def collect_metadata_inventory_only(
                             count_as_found=False,
                         )
                     else:
-                        add_row(mf.name, m, mg, n_, sx, pg, d, ses, rec, wav, "Found")
+                        add_row(
+                            mf.name, m, mg, disp, sx_o, pg, d, ses, rec, wav, "Found"
+                        )
                 done += 1
                 if total_rows > 0:
                     p = progress_base + progress_span * (done / total_rows)
@@ -874,16 +1305,21 @@ def collect_metadata_inventory_only(
         try:
             meta = _load_merged_metadata(metadata_dir, year)
             n = len(meta.get("Mother", []))
+            yr_root = selected.resolve()
             for i in range(n):
                 m, mg, n_, sx, pg, d, ses, rec = _meta_row(meta, i)
-                sx = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
                 wav = resolve_wav_usv_recordings_layout(
                     "USV_Recordings", year, m, mg, n_, pg, int(d), int(ses), rec
                 )
                 if wav is None:
-                    add_row("(metadata dir)", m, mg, n_, sx, pg, d, ses, rec, None, "WAV not found")
+                    sx_o = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
+                    add_row(
+                        "(metadata dir)", m, mg, n_, sx_o, pg, d, ses, rec, None, "Recording file not found"
+                    )
                 else:
                     wav = wav.resolve()
+                    sx_o = _sex_for_metadata_row(sx, m, n_, sex_lookup, yr_root, wav)
+                    disp = _output_pup_name_for_segmentation(yr_root, wav, n_)
                     if _is_year_only_folder(selected):
                         try:
                             wav.relative_to(sel_resolved)
@@ -897,8 +1333,8 @@ def collect_metadata_inventory_only(
                             "(metadata dir)",
                             m,
                             mg,
-                            n_,
-                            sx,
+                            disp,
+                            sx_o,
                             pg,
                             d,
                             ses,
@@ -908,7 +1344,19 @@ def collect_metadata_inventory_only(
                             count_as_found=False,
                         )
                     else:
-                        add_row("(metadata dir)", m, mg, n_, sx, pg, d, ses, rec, wav, "Found")
+                        add_row(
+                            "(metadata dir)",
+                            m,
+                            mg,
+                            disp,
+                            sx_o,
+                            pg,
+                            d,
+                            ses,
+                            rec,
+                            wav,
+                            "Found",
+                        )
                 done += 1
                 if n > 0:
                     p = progress_base + progress_span * (done / n)
@@ -928,12 +1376,14 @@ def process_single_year(
     progress_lo: float,
     progress_hi: float,
     subfolder_prefixes: Optional[List[str]] = None,
+    explicit_metadata_file: Optional[Path] = None,
+    run_classification: bool = True,
 ) -> Tuple[Optional[str], RunSummary, List[MetadataRow]]:
     """
     Run segmentation + features + classification + enrich for one year folder.
     Returns (syllable xlsx path or None, summary, inventory rows with syllable counts filled when applicable).
 
-    If ``subfolder_prefixes`` is non-empty, only recordings whose WAV path lies under
+    If ``subfolder_prefixes`` is non-empty, only recordings whose audio file path lies under
     one of those relative paths (under the year folder) are segmented. Metadata
     workbooks are still read in full; filtered rows are marked skipped in inventory.
     """
@@ -948,7 +1398,7 @@ def process_single_year(
     )
     from steps.read_segmentation import read_segmentation_results  # type: ignore
     from steps.compute_basic_features import compute_basic_features  # type: ignore
-    from steps.classification import run_classification  # type: ignore
+    from steps.classification import run_classification as run_syllable_classification  # type: ignore
     from steps.enrich_columns import enrich_segmentation_columns  # type: ignore
     from utils import read_metadata_as_lists  # type: ignore
 
@@ -959,8 +1409,9 @@ def process_single_year(
         return progress_lo + (progress_hi - progress_lo) * max(0.0, min(1.0, p))
 
     dataset_root, metadata_dir = _resolve_dataset_and_metadata(selected)
-    client_metadata_files = _find_metadata_workbooks_client_layout(selected)
-    sex_lookup = _merge_sex_lookups_from_year_folder(selected)
+    client_metadata_files = _find_metadata_workbooks_client_layout(selected, explicit_metadata_file)
+    sex_lookup = _merge_sex_lookups_from_year_folder(selected, explicit_metadata_file)
+    pup_details_lookup = _merge_pup_details_from_year_folder(selected, explicit_metadata_file)
 
     book, sheet = create_segmentation_workbook()
     audio_paths: List[Path] = []
@@ -974,12 +1425,10 @@ def process_single_year(
     rec_num_r: List = []
     audio_files: List[Path] = []
     total_calls = 0
+    processed_wavs_since_gc = 0
     last_rate: int = 250000
 
-    times_deque: deque = deque(maxlen=8)
-    segment_eta_total = 0
-    segment_eta_done = 0
-    rows_done = 0
+    row_wall_times: deque = deque(maxlen=48)
 
     old_cwd = os.getcwd()
     resolve_wav_path_fn = __import__(
@@ -989,7 +1438,7 @@ def process_single_year(
     welch_sanity_done = False
 
     def _ensure_welch_sanity(signal_arr, rate_hz: int) -> None:
-        """Fail fast on the first loaded WAV if Welch/PSD path cannot run."""
+        """Fail fast on the first loaded recording if Welch/PSD path cannot run."""
         nonlocal welch_sanity_done
         if welch_sanity_done:
             return
@@ -1000,13 +1449,14 @@ def process_single_year(
 
     try:
 
-        def estimate_eta(extra_units: int = 0) -> Optional[float]:
-            if not times_deque or segment_eta_total <= 0:
+        def estimate_row_eta(tr_total: int, tr_done: int) -> Optional[float]:
+            """ETA from mean wall time per metadata row (includes skips and fast paths)."""
+            if tr_total <= 0 or not row_wall_times:
                 return None
-            rem = max(0, segment_eta_total - segment_eta_done - extra_units)
+            rem = max(0, tr_total - tr_done)
             if rem <= 0:
                 return None
-            return float(rem * (sum(times_deque) / len(times_deque)))
+            return float(rem * (sum(row_wall_times) / len(row_wall_times)))
 
         if client_metadata_files:
             total_rows = 0
@@ -1016,9 +1466,6 @@ def process_single_year(
                     total_rows += len(data["Mother"])
                 except Exception:
                     continue
-            # Avoid a full extra pre-pass over all rows (can look "stuck" for large years).
-            # ETA is approximate from actual segmented rows.
-            segment_eta_total = max(1, total_rows)
             rows_done = 0
             sel_resolved = selected.resolve()
             for mf in client_metadata_files:
@@ -1029,376 +1476,404 @@ def process_single_year(
                     continue
                 n = len(data["Mother"])
                 for i in range(n):
-                    rows_done += 1
-                    m, mg, n_, sx, pg, d, ses, rec = _meta_row(data, i)
-                    sx = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
-                    summary.metadata_rows_scanned += 1
-                    if mf.parent.resolve() == sel_resolved:
-                        wav = resolve_wav_under_year_folder(
-                            sel_resolved, m, mg, n_, pg, d, ses, rec
-                        )
-                    else:
-                        wav = _resolve_wav_under_mother_folder(
-                            mf.parent, m, mg, n_, pg, d, ses, rec, resolve_wav_path_fn
-                        )
-                    if wav is None:
-                        inventory.append(
-                            MetadataRow(
-                                year,
-                                mf.name,
-                                m,
-                                mg,
-                                n_,
-                                sx,
-                                pg,
-                                d,
-                                ses,
-                                rec,
-                                "",
-                                "",
-                                "WAV not found",
+                    row_t0 = time.perf_counter()
+                    progress_msg: Optional[str] = None
+                    try:
+                        rows_done += 1
+                        m, mg, n_, sx, pg, d, ses, rec = _meta_row(data, i)
+                        summary.metadata_rows_scanned += 1
+                        if mf.parent.resolve() == sel_resolved:
+                            wav = resolve_wav_under_year_folder(
+                                sel_resolved, m, mg, n_, pg, d, ses, rec
                             )
+                        else:
+                            wav = _resolve_wav_under_mother_folder(
+                                mf.parent, m, mg, n_, pg, d, ses, rec, resolve_wav_path_fn
+                            )
+                        if wav is None:
+                            sx_nf = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
+                            inventory.append(
+                                MetadataRow(
+                                    year,
+                                    mf.name,
+                                    m,
+                                    mg,
+                                    n_,
+                                    sx_nf,
+                                    pg,
+                                    d,
+                                    ses,
+                                    rec,
+                                    "",
+                                    "",
+                                    "Recording file not found",
+                                )
+                            )
+                            continue
+                        wav = wav.resolve()
+                        sx = _sex_for_metadata_row(sx, m, n_, sex_lookup, sel_resolved, wav)
+                        display_name = _output_pup_name_for_segmentation(
+                            sel_resolved, wav, n_
                         )
-                        continue
-                    wav = wav.resolve()
-                    if _is_year_only_folder(selected):
-                        try:
-                            wav.relative_to(sel_resolved)
-                        except ValueError:
+                        if _is_year_only_folder(selected):
+                            try:
+                                wav.relative_to(sel_resolved)
+                            except ValueError:
+                                continue
+
+                        if not wav_matches_subfolder_prefixes(
+                            wav, selected, dataset_root, year, subfolder_prefixes
+                        ):
+                            inventory.append(
+                                MetadataRow(
+                                    year,
+                                    mf.name,
+                                    m,
+                                    mg,
+                                    display_name,
+                                    sx,
+                                    pg,
+                                    d,
+                                    ses,
+                                    rec,
+                                    str(wav),
+                                    _excel_path_column(selected, wav, year),
+                                    "Skipped (subfolder filter)",
+                                    0,
+                                )
+                            )
+                            progress_msg = (
+                                f"[{year}] Skip (subfolder filter): {_wav_log_path(wav)}"
+                            )
                             continue
 
-                    if not wav_matches_subfolder_prefixes(
-                        wav, selected, dataset_root, year, subfolder_prefixes
-                    ):
+                        summary.wav_files_found += 1
+                        try:
+                            signal, rate = librosa.load(str(wav), sr=250000)
+                            last_rate = int(rate)
+                            _ensure_welch_sanity(signal, last_rate)
+                            calls = segment_single_recording(
+                                signal=signal,
+                                Fs=rate,
+                                frame_length=FRAME_LENGTH,
+                                overlap=OVERLAP,
+                                thresh=THRESH,
+                                harmony_th=HARMONY_TH,
+                                signal_file_name=str(wav),
+                            )
+                        except Exception as exc:
+                            summary.wav_segmentation_failed += 1
+                            summary.error_messages.append(f"{_wav_log_path(wav)}: {exc}")
+                            inventory.append(
+                                MetadataRow(
+                                    year,
+                                    mf.name,
+                                    m,
+                                    mg,
+                                    display_name,
+                                    sx,
+                                    pg,
+                                    d,
+                                    ses,
+                                    rec,
+                                    str(wav),
+                                    _excel_path_column(selected, wav, year),
+                                    f"Error: {exc}",
+                                    0,
+                                )
+                            )
+                            continue
+
+                        del signal
+                        processed_wavs_since_gc += 1
+                        if processed_wavs_since_gc >= 250:
+                            gc.collect()
+                            processed_wavs_since_gc = 0
+
+                        summary.wav_segmentation_succeeded += 1
+                        if not calls:
+                            summary.recordings_with_zero_syllables += 1
+
+                        audio_paths.append(wav)
+                        mother_r.append(m)
+                        matgen_r.append(mg)
+                        name_r.append(display_name)
+                        sex_r.append(sx)
+                        pupgen_r.append(pg)
+                        age_r.append(int(d))
+                        session_r.append(int(ses))
+                        rec_num_r.append(rec)
+                        audio_files.append(wav)
+
+                        path_excel = _excel_path_column(selected, wav, year)
                         inventory.append(
                             MetadataRow(
                                 year,
                                 mf.name,
                                 m,
                                 mg,
-                                n_,
+                                display_name,
                                 sx,
                                 pg,
                                 d,
                                 ses,
                                 rec,
                                 str(wav),
-                                _excel_path_column(selected, wav, year),
-                                "Skipped (subfolder filter)",
-                                0,
+                                path_excel,
+                                "OK",
+                                len(calls),
                             )
                         )
-                        eta = estimate_eta()
+
+                        for call in calls:
+                            st, en = float(call[0]), float(call[1])
+                            sheet.append(
+                                [
+                                    path_excel,
+                                    m,
+                                    mg,
+                                    display_name,
+                                    sx,
+                                    pg,
+                                    int(d),
+                                    int(ses),
+                                    rec,
+                                    st,
+                                    en,
+                                    en - st,
+                                ]
+                            )
+                            total_calls += 1
+
+                        progress_msg = (
+                            f"[{year}] Segmenting recording {rows_done}/{total_rows}: {_wav_log_path(wav)}"
+                        )
+                    finally:
+                        row_wall_times.append(
+                            min(300.0, max(0.0, time.perf_counter() - row_t0))
+                        )
+                    if progress_msg:
                         _emit_progress(
                             progress,
                             span_t(0.55 * (rows_done / max(1, total_rows))),
-                            f"[{year}] Skip (subfolder filter): {_wav_log_path(wav)}",
-                            eta,
+                            progress_msg,
+                            None,
                         )
-                        continue
-
-                    summary.wav_files_found += 1
-                    t0 = time.perf_counter()
-                    try:
-                        signal, rate = librosa.load(str(wav), sr=250000)
-                        last_rate = int(rate)
-                        _ensure_welch_sanity(signal, last_rate)
-                        calls = segment_single_recording(
-                            signal=signal,
-                            Fs=rate,
-                            frame_length=FRAME_LENGTH,
-                            overlap=OVERLAP,
-                            thresh=THRESH,
-                            harmony_th=HARMONY_TH,
-                            signal_file_name=str(wav),
-                        )
-                    except Exception as exc:
-                        summary.wav_segmentation_failed += 1
-                        summary.error_messages.append(f"{_wav_log_path(wav)}: {exc}")
-                        inventory.append(
-                            MetadataRow(
-                                year,
-                                mf.name,
-                                m,
-                                mg,
-                                n_,
-                                sx,
-                                pg,
-                                d,
-                                ses,
-                                rec,
-                                str(wav),
-                                _excel_path_column(selected, wav, year),
-                                f"Error: {exc}",
-                                0,
-                            )
-                        )
-                        segment_eta_done += 1
-                        continue
-
-                    del signal
-                    gc.collect()
-
-                    times_deque.append(time.perf_counter() - t0)
-                    segment_eta_done += 1
-                    summary.wav_segmentation_succeeded += 1
-                    if not calls:
-                        summary.recordings_with_zero_syllables += 1
-
-                    audio_paths.append(wav)
-                    mother_r.append(m)
-                    matgen_r.append(mg)
-                    name_r.append(n_)
-                    sex_r.append(sx)
-                    pupgen_r.append(pg)
-                    age_r.append(int(d))
-                    session_r.append(int(ses))
-                    rec_num_r.append(rec)
-                    audio_files.append(wav)
-
-                    path_excel = _excel_path_column(selected, wav, year)
-                    inventory.append(
-                        MetadataRow(
-                            year,
-                            mf.name,
-                            m,
-                            mg,
-                            n_,
-                            sx,
-                            pg,
-                            d,
-                            ses,
-                            rec,
-                            str(wav),
-                            path_excel,
-                            "OK",
-                            len(calls),
-                        )
-                    )
-
-                    for call in calls:
-                        st, en = float(call[0]), float(call[1])
-                        sheet.append(
-                            [
-                                path_excel,
-                                m,
-                                mg,
-                                n_,
-                                sx,
-                                pg,
-                                int(d),
-                                int(ses),
-                                rec,
-                                st,
-                                en,
-                                en - st,
-                            ]
-                        )
-                        total_calls += 1
-
-                    eta = estimate_eta()
-                    _emit_progress(
-                        progress,
-                        span_t(0.55 * (rows_done / max(1, total_rows))),
-                        f"[{year}] Segment {segment_eta_done}/{segment_eta_total}: {_wav_log_path(wav)}",
-                        eta,
-                    )
 
         elif dataset_root is not None and metadata_dir is not None:
             os.chdir(str(dataset_root))
             meta = _load_merged_metadata(metadata_dir, year)
             n_meta = len(meta.get("Mother", [])) if meta else 0
-            # Same optimization for USV_Recordings layout: no expensive pre-count pass.
-            segment_eta_total = max(1, n_meta)
             rows_done = 0
             if n_meta > 0:
                 from utils.audio_paths import resolve_wav_usv_recordings_layout  # type: ignore
 
+                year_root_resolved = selected.resolve()
                 for i in range(n_meta):
-                    rows_done += 1
-                    m, mg, n_, sx, pg, d, ses, rec = _meta_row(meta, i)
-                    sx = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
-                    summary.metadata_rows_scanned += 1
-                    wav = resolve_wav_usv_recordings_layout(
-                        "USV_Recordings",
-                        year,
-                        m,
-                        mg,
-                        n_,
-                        pg,
-                        int(d),
-                        int(ses),
-                        rec,
-                    )
-                    if wav is None:
-                        inventory.append(
-                            MetadataRow(
-                                year,
-                                "(metadata)",
-                                m,
-                                mg,
-                                n_,
-                                sx,
-                                pg,
-                                d,
-                                ses,
-                                rec,
-                                "",
-                                "",
-                                "WAV not found",
-                            )
-                        )
-                        continue
-                    wav = wav.resolve()
-                    if _is_year_only_folder(selected):
-                        try:
-                            wav.relative_to(selected.resolve())
-                        except ValueError:
-                            continue
-
-                    if not wav_matches_subfolder_prefixes(
-                        wav, selected, dataset_root, year, subfolder_prefixes
-                    ):
-                        inventory.append(
-                            MetadataRow(
-                                year,
-                                "(metadata)",
-                                m,
-                                mg,
-                                n_,
-                                sx,
-                                pg,
-                                d,
-                                ses,
-                                rec,
-                                str(wav),
-                                _excel_path_from_resolved_wav(dataset_root, wav, year),
-                                "Skipped (subfolder filter)",
-                                0,
-                            )
-                        )
-                        eta = estimate_eta()
-                        _emit_progress(
-                            progress,
-                            span_t(0.55 * (rows_done / max(1, n_meta))),
-                            f"[{year}] Skip (subfolder filter): {_wav_log_path(wav)}",
-                            eta,
-                        )
-                        continue
-
-                    summary.wav_files_found += 1
-                    t0 = time.perf_counter()
+                    row_t0 = time.perf_counter()
+                    progress_msg: Optional[str] = None
                     try:
-                        signal, rate = librosa.load(str(wav), sr=250000)
-                        last_rate = int(rate)
-                        _ensure_welch_sanity(signal, last_rate)
-                        calls = segment_single_recording(
-                            signal=signal,
-                            Fs=rate,
-                            frame_length=FRAME_LENGTH,
-                            overlap=OVERLAP,
-                            thresh=THRESH,
-                            harmony_th=HARMONY_TH,
-                            signal_file_name=str(wav),
-                        )
-                    except Exception as exc:
-                        summary.wav_segmentation_failed += 1
-                        summary.error_messages.append(f"{_wav_log_path(wav)}: {exc}")
-                        inventory.append(
-                            MetadataRow(
-                                year,
-                                "(metadata)",
-                                m,
-                                mg,
-                                n_,
-                                sx,
-                                pg,
-                                d,
-                                ses,
-                                rec,
-                                str(wav),
-                                _excel_path_from_resolved_wav(dataset_root, wav, year),
-                                f"Error: {exc}",
-                                0,
-                            )
-                        )
-                        segment_eta_done += 1
-                        continue
-
-                    del signal
-                    gc.collect()
-                    times_deque.append(time.perf_counter() - t0)
-                    segment_eta_done += 1
-                    summary.wav_segmentation_succeeded += 1
-                    if not calls:
-                        summary.recordings_with_zero_syllables += 1
-
-                    audio_paths.append(wav)
-                    mother_r.append(m)
-                    matgen_r.append(mg)
-                    name_r.append(n_)
-                    sex_r.append(sx)
-                    pupgen_r.append(pg)
-                    age_r.append(int(d))
-                    session_r.append(int(ses))
-                    rec_num_r.append(rec)
-                    audio_files.append(wav)
-
-                    path_excel = _excel_path_from_resolved_wav(dataset_root, wav, year)
-                    inventory.append(
-                        MetadataRow(
+                        rows_done += 1
+                        m, mg, n_, sx, pg, d, ses, rec = _meta_row(meta, i)
+                        summary.metadata_rows_scanned += 1
+                        wav = resolve_wav_usv_recordings_layout(
+                            "USV_Recordings",
                             year,
-                            "(metadata)",
                             m,
                             mg,
                             n_,
-                            sx,
                             pg,
-                            d,
-                            ses,
+                            int(d),
+                            int(ses),
                             rec,
-                            str(wav),
-                            path_excel,
-                            "OK",
-                            len(calls),
                         )
-                    )
+                        if wav is None:
+                            sx_nf = _excel_sex_with_pup_fallback(sx, m, n_, sex_lookup)
+                            inventory.append(
+                                MetadataRow(
+                                    year,
+                                    "(metadata)",
+                                    m,
+                                    mg,
+                                    n_,
+                                    sx_nf,
+                                    pg,
+                                    d,
+                                    ses,
+                                    rec,
+                                    "",
+                                    "",
+                                    "Recording file not found",
+                                )
+                            )
+                            continue
+                        wav = wav.resolve()
+                        sx = _sex_for_metadata_row(
+                            sx, m, n_, sex_lookup, year_root_resolved, wav
+                        )
+                        display_name = _output_pup_name_for_segmentation(
+                            year_root_resolved, wav, n_
+                        )
+                        if _is_year_only_folder(selected):
+                            try:
+                                wav.relative_to(selected.resolve())
+                            except ValueError:
+                                continue
 
-                    for call in calls:
-                        st, en = float(call[0]), float(call[1])
-                        sheet.append(
-                            [
-                                path_excel,
+                        if not wav_matches_subfolder_prefixes(
+                            wav, selected, dataset_root, year, subfolder_prefixes
+                        ):
+                            inventory.append(
+                                MetadataRow(
+                                    year,
+                                    "(metadata)",
+                                    m,
+                                    mg,
+                                    display_name,
+                                    sx,
+                                    pg,
+                                    d,
+                                    ses,
+                                    rec,
+                                    str(wav),
+                                    _excel_path_from_resolved_wav(dataset_root, wav, year),
+                                    "Skipped (subfolder filter)",
+                                    0,
+                                )
+                            )
+                            progress_msg = (
+                                f"[{year}] Skip (subfolder filter): {_wav_log_path(wav)}"
+                            )
+                            continue
+
+                        summary.wav_files_found += 1
+                        try:
+                            signal, rate = librosa.load(str(wav), sr=250000)
+                            last_rate = int(rate)
+                            _ensure_welch_sanity(signal, last_rate)
+                            calls = segment_single_recording(
+                                signal=signal,
+                                Fs=rate,
+                                frame_length=FRAME_LENGTH,
+                                overlap=OVERLAP,
+                                thresh=THRESH,
+                                harmony_th=HARMONY_TH,
+                                signal_file_name=str(wav),
+                            )
+                        except Exception as exc:
+                            summary.wav_segmentation_failed += 1
+                            summary.error_messages.append(f"{_wav_log_path(wav)}: {exc}")
+                            inventory.append(
+                                MetadataRow(
+                                    year,
+                                    "(metadata)",
+                                    m,
+                                    mg,
+                                    display_name,
+                                    sx,
+                                    pg,
+                                    d,
+                                    ses,
+                                    rec,
+                                    str(wav),
+                                    _excel_path_from_resolved_wav(dataset_root, wav, year),
+                                    f"Error: {exc}",
+                                    0,
+                                )
+                            )
+                            continue
+
+                        del signal
+                        processed_wavs_since_gc += 1
+                        if processed_wavs_since_gc >= 250:
+                            gc.collect()
+                            processed_wavs_since_gc = 0
+                        summary.wav_segmentation_succeeded += 1
+                        if not calls:
+                            summary.recordings_with_zero_syllables += 1
+
+                        audio_paths.append(wav)
+                        mother_r.append(m)
+                        matgen_r.append(mg)
+                        name_r.append(display_name)
+                        sex_r.append(sx)
+                        pupgen_r.append(pg)
+                        age_r.append(int(d))
+                        session_r.append(int(ses))
+                        rec_num_r.append(rec)
+                        audio_files.append(wav)
+
+                        path_excel = _excel_path_from_resolved_wav(dataset_root, wav, year)
+                        inventory.append(
+                            MetadataRow(
+                                year,
+                                "(metadata)",
                                 m,
                                 mg,
-                                n_,
+                                display_name,
                                 sx,
                                 pg,
-                                int(d),
-                                int(ses),
+                                d,
+                                ses,
                                 rec,
-                                st,
-                                en,
-                                en - st,
-                            ]
+                                str(wav),
+                                path_excel,
+                                "OK",
+                                len(calls),
+                            )
                         )
-                        total_calls += 1
 
-                    eta = estimate_eta()
-                    _emit_progress(
-                        progress,
-                        span_t(0.55 * (rows_done / max(1, n_meta))),
-                        f"[{year}] Segment {segment_eta_done}/{segment_eta_total}: {_wav_log_path(wav)}",
-                        eta,
-                    )
+                        for call in calls:
+                            st, en = float(call[0]), float(call[1])
+                            sheet.append(
+                                [
+                                    path_excel,
+                                    m,
+                                    mg,
+                                    display_name,
+                                    sx,
+                                    pg,
+                                    int(d),
+                                    int(ses),
+                                    rec,
+                                    st,
+                                    en,
+                                    en - st,
+                                ]
+                            )
+                            total_calls += 1
+
+                        progress_msg = (
+                            f"[{year}] Segmenting recording {rows_done}/{n_meta}: {_wav_log_path(wav)}"
+                        )
+                    finally:
+                        row_wall_times.append(
+                            min(300.0, max(0.0, time.perf_counter() - row_t0))
+                        )
+                    if progress_msg:
+                        _emit_progress(
+                            progress,
+                            span_t(0.55 * (rows_done / max(1, n_meta))),
+                            progress_msg,
+                            None,
+                        )
 
         if not audio_files:
             os.chdir(old_cwd)
-            _emit_progress(progress, span_t(0.05), f"[{year}] WAV scan fallback...")
-            wav_list = _scan_audio_files(selected)
+            _emit_progress(
+                progress,
+                span_t(0.05),
+                f"[{year}] Discovering audio files under folder…",
+                None,
+            )
+            wav_list = _scan_audio_files(
+                selected, progress=progress, progress_p=span_t(0.05), year=year
+            )
             if not wav_list:
                 if not inventory and total_calls == 0:
-                    raise ValueError(f"[{year}] No WAV files and no usable metadata rows.")
+                    raise ValueError(
+                        f"[{year}] No audio recordings found and no usable metadata rows."
+                    )
             else:
                 filtered_wavs = [
                     wp.resolve()
@@ -1407,77 +1882,81 @@ def process_single_year(
                         wp.resolve(), selected, dataset_root, year, subfolder_prefixes
                     )
                 ]
-                segment_eta_total = len(filtered_wavs)
-                segment_eta_done = 0
-                for wp in filtered_wavs:
-                    summary.metadata_rows_scanned += 1
-                    summary.wav_files_found += 1
-                    t0 = time.perf_counter()
+                row_wall_times.clear()
+                scan_n = max(1, len(filtered_wavs))
+                for idx, wp in enumerate(filtered_wavs, start=1):
+                    row_t0 = time.perf_counter()
+                    progress_msg: Optional[str] = None
                     try:
-                        signal, rate = librosa.load(str(wp), sr=250000)
-                        last_rate = int(rate)
-                        _ensure_welch_sanity(signal, last_rate)
-                        calls = segment_single_recording(
-                            signal=signal,
-                            Fs=rate,
-                            frame_length=FRAME_LENGTH,
-                            overlap=OVERLAP,
-                            thresh=THRESH,
-                            harmony_th=HARMONY_TH,
-                            signal_file_name=str(wp),
-                        )
-                    except Exception as exc:
-                        summary.wav_segmentation_failed += 1
-                        summary.error_messages.append(f"{_wav_log_path(wp)}: {exc}")
-                        segment_eta_done += 1
-                        continue
+                        summary.metadata_rows_scanned += 1
+                        summary.wav_files_found += 1
+                        try:
+                            signal, rate = librosa.load(str(wp), sr=250000)
+                            last_rate = int(rate)
+                            _ensure_welch_sanity(signal, last_rate)
+                            calls = segment_single_recording(
+                                signal=signal,
+                                Fs=rate,
+                                frame_length=FRAME_LENGTH,
+                                overlap=OVERLAP,
+                                thresh=THRESH,
+                                harmony_th=HARMONY_TH,
+                                signal_file_name=str(wp),
+                            )
+                        except Exception as exc:
+                            summary.wav_segmentation_failed += 1
+                            summary.error_messages.append(f"{_wav_log_path(wp)}: {exc}")
+                            continue
 
-                    del signal
-                    gc.collect()
-                    times_deque.append(time.perf_counter() - t0)
-                    segment_eta_done += 1
-                    summary.wav_segmentation_succeeded += 1
-                    if not calls:
-                        summary.recordings_with_zero_syllables += 1
+                        del signal
+                        processed_wavs_since_gc += 1
+                        if processed_wavs_since_gc >= 250:
+                            gc.collect()
+                            processed_wavs_since_gc = 0
+                        summary.wav_segmentation_succeeded += 1
+                        if not calls:
+                            summary.recordings_with_zero_syllables += 1
 
-                    m, mg, n_, _, pg, d, ses, rec = _extract_row_metadata_from_path_layout(
-                        selected, wp
-                    )
-                    sx = _resolve_sex_from_pup_tables(m, n_, sex_lookup)
-                    audio_paths.append(wp)
-                    mother_r.append(m)
-                    matgen_r.append(mg)
-                    name_r.append(n_)
-                    sex_r.append(sx)
-                    pupgen_r.append(pg)
-                    age_r.append(d)
-                    session_r.append(ses)
-                    rec_num_r.append(rec)
-                    audio_files.append(wp)
-                    path_excel = _excel_path_column(selected, wp, year)
-                    inventory.append(
-                        MetadataRow(
-                            year,
-                            "(scan)",
-                            m,
-                            mg,
-                            n_,
-                            sx,
-                            pg,
-                            d,
-                            ses,
-                            rec,
-                            str(wp),
-                            path_excel,
-                            "OK",
-                            len(calls),
+                        m, mg, n_, sx_guess, pg, d, ses, rec = _extract_row_metadata_from_path_layout(
+                            selected, wp
                         )
-                    )
-                    for call in calls:
-                        st, en = float(call[0]), float(call[1])
-                        sheet.append(
-                            [
-                                path_excel,
+                        raw_pup = _raw_pup_folder_from_path(selected, wp)
+                        path_name_hints = _pup_path_hints_for_wav(selected, wp)
+                        details = _resolve_pup_details(m, raw_pup, n_, pup_details_lookup)
+                        if details is not None:
+                            if str(details.get("offspring_genotype", "")).strip():
+                                pg = _normalize_genotype_token(str(details["offspring_genotype"]))
+                            ds = str(details.get("sex", "")).strip()
+                            if ds:
+                                from utils.io_utils import normalize_sex_cell  # type: ignore
+
+                                sx = normalize_sex_cell(ds)
+                            else:
+                                sx = _resolve_sex_from_pup_tables(
+                                    m,
+                                    n_,
+                                    sex_lookup,
+                                    extra_name_hints=path_name_hints,
+                                )
+                        else:
+                            sx = _sex_for_metadata_row(
+                                sx_guess, m, n_, sex_lookup, selected, wp
+                            )
+                        audio_paths.append(wp)
+                        mother_r.append(m)
+                        matgen_r.append(mg)
+                        name_r.append(n_)
+                        sex_r.append(sx)
+                        pupgen_r.append(pg)
+                        age_r.append(d)
+                        session_r.append(ses)
+                        rec_num_r.append(rec)
+                        audio_files.append(wp)
+                        path_excel = _excel_path_column(selected, wp, year)
+                        inventory.append(
+                            MetadataRow(
+                                year,
+                                "(scan)",
                                 m,
                                 mg,
                                 n_,
@@ -1486,19 +1965,45 @@ def process_single_year(
                                 d,
                                 ses,
                                 rec,
-                                st,
-                                en,
-                                en - st,
-                            ]
+                                str(wp),
+                                path_excel,
+                                "OK",
+                                len(calls),
+                            )
                         )
-                        total_calls += 1
-                    eta = estimate_eta()
-                    _emit_progress(
-                        progress,
-                        span_t(0.55 * (segment_eta_done / max(1, segment_eta_total))),
-                        f"[{year}] Segment {segment_eta_done}/{segment_eta_total}: {_wav_log_path(wp)}",
-                        eta,
-                    )
+                        for call in calls:
+                            st, en = float(call[0]), float(call[1])
+                            sheet.append(
+                                [
+                                    path_excel,
+                                    m,
+                                    mg,
+                                    n_,
+                                    sx,
+                                    pg,
+                                    d,
+                                    ses,
+                                    rec,
+                                    st,
+                                    en,
+                                    en - st,
+                                ]
+                            )
+                            total_calls += 1
+                        progress_msg = (
+                            f"[{year}] Segmenting recording {idx}/{scan_n}: {_wav_log_path(wp)}"
+                        )
+                    finally:
+                        row_wall_times.append(
+                            min(300.0, max(0.0, time.perf_counter() - row_t0))
+                        )
+                    if progress_msg:
+                        _emit_progress(
+                            progress,
+                            span_t(0.55 * (idx / scan_n)),
+                            progress_msg,
+                            None,
+                        )
 
         try:
             os.chdir(old_cwd)
@@ -1514,15 +2019,35 @@ def process_single_year(
             raise ValueError(f"[{year}] No recordings processed.{hint}")
 
         ts = output_timestamp_suffix()
-        output_path = outputs_dir / f"segmentation_{year}_{ts}.xlsx"
+        out_stem = "segmentation_classification" if run_classification else "segmentation"
+        output_path = outputs_dir / f"{out_stem}_{year}_{ts}.xlsx"
         outputs_dir.mkdir(parents=True, exist_ok=True)
-        _emit_progress(progress, span_t(0.58), f"[{year}] Saving segmentation workbook...")
+        if run_classification:
+            p_save, p_read, p_feat, p_cls_lo, p_pre_enrich, p_done = (
+                0.58,
+                0.62,
+                0.70,
+                0.82,
+                0.94,
+                1.0,
+            )
+        else:
+            p_save, p_read, p_feat, p_cls_lo, p_pre_enrich, p_done = (
+                0.58,
+                0.62,
+                0.74,
+                0.82,
+                0.88,
+                1.0,
+            )
+        _emit_progress(progress, span_t(p_save), f"[{year}] Saving segmentation workbook...")
         book.save(str(output_path))
         out_str = str(output_path.resolve())
         siz = len(audio_paths)
 
-        _emit_progress(progress, span_t(0.62), f"[{year}] Reading segmentation table...")
+        _emit_progress(progress, span_t(p_read), f"[{year}] Reading segmentation table...")
         (
+            path_syl,
             mother_syl,
             matgen_syl,
             name_syl,
@@ -1535,7 +2060,7 @@ def process_single_year(
             end_syl,
         ) = read_segmentation_results(out_str, logger=None)
 
-        _emit_progress(progress, span_t(0.70), f"[{year}] Computing ISI and frequencies...")
+        _emit_progress(progress, span_t(p_feat), f"[{year}] Computing ISI and frequencies...")
         compute_basic_features(
             file_path=out_str,
             signal_vec=None,
@@ -1557,80 +2082,147 @@ def process_single_year(
             audio_paths=audio_paths,
         )
 
-        cls_root = _classification_year_root(selected, year, dataset_root)
-        model_path, model_tried_paths = _resolve_model_path()
-        year_audio = cls_root if cls_root.is_dir() else None
+        if run_classification:
+            cls_root = _classification_year_root(selected, year, dataset_root)
+            model_path, model_tried_paths = _resolve_model_path()
+            year_audio = cls_root if cls_root.is_dir() else None
+            cnn_span = max(1e-6, p_pre_enrich - p_cls_lo)
 
-        if model_path is not None:
-            summary.classification_model_path = str(model_path.resolve())
-            _emit_progress(progress, span_t(0.82), f"[{year}] Running syllable classification (CNN)...")
-            total_cnn = max(1, len(mother_syl))
-            cnn_times: deque = deque(maxlen=16)
-            last_cnn_t = time.perf_counter()
-
-            def on_cnn_progress(done: int, total: int) -> None:
-                nonlocal last_cnn_t
-                now = time.perf_counter()
-                dt = now - last_cnn_t
-                last_cnn_t = now
-                if 0 < dt < 3600.0:
-                    cnn_times.append(dt)
-                eta_cnn: Optional[float] = None
-                if cnn_times:
-                    avg = sum(cnn_times) / len(cnn_times)
-                    rem = max(0, total - done)
-                    eta_cnn = float(rem * avg)
-                frac = min(1.0, done / max(1, total))
-                p_inner = 0.82 + 0.12 * frac
+            if model_path is not None:
+                summary.classification_model_path = str(model_path.resolve())
                 _emit_progress(
                     progress,
-                    span_t(p_inner),
-                    f"[{year}] CNN syllables {done}/{total}",
-                    eta_cnn,
+                    span_t(p_cls_lo),
+                    f"[{year}] Syllable classification…",
+                    None,
                 )
+                cnn_hook_phase: List[str] = ["resolve_paths"]
 
-            try:
-                run_classification(
-                    file_path=out_str,
-                    year=year,
-                    model_path=str(model_path),
-                    age_syl=age_syl,
-                    matgen_syl=matgen_syl,
-                    pupgen_syl=pupgen_syl,
-                    mother_syl=mother_syl,
-                    name_syl=name_syl,
-                    sex_syl=sex_syl,
-                    session_syl=session_syl,
-                    rec_num_syl=rec_num_syl,
-                    start_syl=start_syl,
-                    end_syl=end_syl,
-                    logger=None,
-                    year_audio_root=year_audio,
-                    progress_hook=on_cnn_progress,
-                    save_npy=False,
+                def on_cnn_progress(
+                    done: int,
+                    total: int,
+                    phase: str = "spectrograms",
+                    chunk_end: Optional[int] = None,
+                ) -> None:
+                    phase_bucket = (
+                        "predict"
+                        if phase in ("predict", "predict_chunk")
+                        else phase
+                    )
+                    if phase_bucket != cnn_hook_phase[0]:
+                        cnn_hook_phase[0] = phase_bucket
+                    frac_done = min(1.0, done / max(1, total))
+                    if phase == "resolve_paths":
+                        frac_in_cnn = 0.05 * frac_done
+                        msg = f"[{year}] Classify: resolving paths {done}/{total}"
+                    elif phase == "spectrograms":
+                        frac_in_cnn = 0.05 + 0.50 * frac_done
+                        msg = f"[{year}] Build spectrograms {done}/{total}"
+                    elif phase == "predict_chunk":
+                        ce = int(chunk_end) if chunk_end is not None else done
+                        ce = min(ce, total)
+                        lo = min(total, done + 1)
+                        frac_in_cnn = 0.55 + 0.45 * (done / max(1, total))
+                        hint = (
+                            " — first batches can take many minutes (model/GPU warmup)"
+                            if done == 0
+                            else ""
+                        )
+                        msg = (
+                            f"[{year}] Classify: inference in progress "
+                            f"(syllables {lo}–{ce} of {total}){hint}…"
+                        )
+                    else:
+                        frac_in_cnn = 0.55 + 0.45 * frac_done
+                        msg = f"[{year}] Classify {done}/{total}"
+                    p_inner = p_cls_lo + cnn_span * frac_in_cnn
+                    _emit_progress(
+                        progress,
+                        span_t(p_inner),
+                        msg,
+                        None,
+                    )
+
+                def on_classify_stage(phase: str) -> None:
+                    labels = {
+                        "load_model": f"[{year}] Classify: loading model (TensorFlow)…",
+                        "model_ready": f"[{year}] Classify: model ready",
+                        "postprocess": f"[{year}] Finishing classification (post-processing labels)…",
+                        "write_excel": f"[{year}] Writing syllable labels to Excel (large file, please wait)…",
+                        "write_done": f"[{year}] Syllable labels saved.",
+                    }
+                    msg = labels.get(phase, phase)
+                    frac = {
+                        "load_model": 0.02,
+                        "model_ready": 0.04,
+                        "postprocess": 0.97,
+                        "write_excel": 0.99,
+                        "write_done": 1.0,
+                    }.get(phase, 1.0)
+                    inner_p = p_cls_lo + cnn_span * min(1.0, float(frac))
+                    _emit_progress(progress, span_t(inner_p), msg, None)
+
+                try:
+                    run_syllable_classification(
+                        file_path=out_str,
+                        year=year,
+                        model_path=str(model_path),
+                        age_syl=age_syl,
+                        matgen_syl=matgen_syl,
+                        pupgen_syl=pupgen_syl,
+                        mother_syl=mother_syl,
+                        name_syl=name_syl,
+                        sex_syl=sex_syl,
+                        session_syl=session_syl,
+                        rec_num_syl=rec_num_syl,
+                        start_syl=start_syl,
+                        end_syl=end_syl,
+                        wav_path_syl=path_syl,
+                        logger=None,
+                        year_audio_root=year_audio,
+                        progress_hook=on_cnn_progress,
+                        save_npy=False,
+                        stage_callback=on_classify_stage,
+                    )
+                except Exception as exc:
+                    summary.error_messages.append(f"Classification: {exc}")
+                    _write_constant_syllable_column(out_str, 10)
+            else:
+                tried_txt = "; ".join(model_tried_paths) if model_tried_paths else "(no candidates)"
+                summary.error_messages.append(
+                    "Classification skipped (model_weights.h6 not found). "
+                    f"Set USV_MODEL_PATH or place the file under segmentation-app/models/. Checked: {tried_txt}"
                 )
-            except Exception as exc:
-                summary.error_messages.append(f"Classification: {exc}")
                 _write_constant_syllable_column(out_str, 10)
-        else:
-            tried_txt = "; ".join(model_tried_paths) if model_tried_paths else "(no candidates)"
-            summary.error_messages.append(
-                "Classification skipped (model_weights.h6 not found). "
-                f"Set USV_MODEL_PATH or place the file under segmentation-app/models/. Checked: {tried_txt}"
-            )
-            _write_constant_syllable_column(out_str, 10)
 
-        _emit_progress(progress, span_t(0.94), f"[{year}] Enriching columns...")
-        enrich_segmentation_columns(file_path=out_str, year=year, logger=None)
+        _emit_progress(
+            progress,
+            span_t(p_pre_enrich),
+            f"[{year}] Enriching columns (large workbooks may take several minutes)…",
+            None,
+        )
+        enrich_segmentation_columns(
+            file_path=out_str,
+            year=year,
+            logger=None,
+            include_syllable_classification_columns=run_classification,
+        )
+        mid_done = p_pre_enrich + (p_done - p_pre_enrich) * 0.88
+        _emit_progress(
+            progress,
+            span_t(mid_done),
+            f"[{year}] Enrichment saved; updating metadata counts…",
+            None,
+        )
 
         merge_syllable_counts_from_excel(inventory, out_str)
 
         summary.output_files.append(out_str)
         _emit_progress(
             progress,
-            span_t(1.0),
+            span_t(p_done),
             f"[{year}] Done. Syllables: {total_calls}. Output: {out_str}",
-            0.0,
+            None,
         )
         return out_str, summary, inventory
 
@@ -1652,7 +2244,23 @@ def run_pipeline(options: PipelineOptions, progress: ProgressFn) -> Tuple[RunSum
     out_dir = Path(options.output_dir).resolve() if options.output_dir else Path.cwd() / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    _emit_progress(progress, 0.02, "Initializing preprocessing modules...")
+    last_emitted_bar_p = 0.0
+
+    def _emit_overall_progress(
+        p: float,
+        msg: str,
+        stage_eta_seconds: Optional[float] = None,
+    ) -> None:
+        """Emit overall pipeline progress (no ETA — UI shows elapsed time only)."""
+        nonlocal last_emitted_bar_p
+        _ = stage_eta_seconds  # unused; kept for call-site compatibility
+        p_clamped = max(0.0, min(1.0, float(p)))
+        if p_clamped + 1e-9 < last_emitted_bar_p:
+            p_clamped = last_emitted_bar_p
+        last_emitted_bar_p = p_clamped
+        _emit_progress(progress, p_clamped, msg, None)
+
+    _emit_overall_progress(0.0, "Initializing preprocessing modules...")
     preprocessing_dir = _runtime_base_dir() / "preprocessing"
     if not preprocessing_dir.exists():
         raise ValueError("Missing `preprocessing` directory next to app files.")
@@ -1668,19 +2276,32 @@ def run_pipeline(options: PipelineOptions, progress: ProgressFn) -> Tuple[RunSum
     total_summary = RunSummary()
     all_outputs: List[str] = []
     n_years = len(pairs)
+    per_year_summary: List[Dict[str, Any]] = []
+
+    def _progress_year_eta_global_only(p: float, msg: str, eta: Optional[float] = None) -> None:
+        """Row/phase ETAs from process_single_year are for the current year only; blend distorts multi-year ETA."""
+        if n_years > 1:
+            eta = None
+        _emit_overall_progress(p, msg, eta)
 
     years_with_outputs = 0
+    years_skipped_by_empty_tree = 0
     for yi, (year_str, year_path) in enumerate(pairs):
         lo = yi / n_years
         hi = (yi + 1) / n_years
         subfolder_prefixes = _opt_year_subfolders(options.subfolder_filters, year_str)
-        _emit_progress(progress, lo, f"Year {year_str}: starting...")
+        explicit_meta_for_year: Optional[Path] = None
+        if options.metadata_file_overrides and year_str in options.metadata_file_overrides:
+            p = str(options.metadata_file_overrides[year_str]).strip()
+            if p:
+                explicit_meta_for_year = Path(p)
+        _emit_overall_progress(lo, f"Year {year_str}: starting...")
         if subfolder_prefixes is not None and len(subfolder_prefixes) == 0:
-            _emit_progress(
-                progress,
+            _emit_overall_progress(
                 hi,
                 f"Year {year_str}: no folders selected in the tree — skipped.",
             )
+            years_skipped_by_empty_tree += 1
             continue
 
         total_summary.years_processed.append(year_str)
@@ -1697,15 +2318,17 @@ def run_pipeline(options: PipelineOptions, progress: ProgressFn) -> Tuple[RunSum
                     progress_base=lo,
                     progress_span=hi - lo,
                     subfolder_prefixes=subfolder_prefixes,
+                    explicit_metadata_file=explicit_meta_for_year,
                 )
                 meta_path = str(out_dir / f"recordings_metadata_{year_str}_{output_timestamp_suffix()}.xlsx")
-                _emit_progress(progress, lo + (hi - lo) * 0.95, f"Year {year_str}: writing metadata workbook...")
+                _emit_overall_progress(lo + (hi - lo) * 0.95, f"Year {year_str}: writing metadata workbook...")
                 save_metadata_inventory(meta_path, inv_rows)
                 total_summary.merge(part)
                 total_summary.output_files.append(meta_path)
                 all_outputs.append(meta_path)
+                per_year_summary.append(_inventory_year_summary_row(inv_rows, year_str))
                 years_with_outputs += 1
-                _emit_progress(progress, hi, f"Year {year_str} metadata inventory saved.")
+                _emit_overall_progress(hi, f"Year {year_str} metadata inventory saved.")
                 continue
 
             syllable_path: Optional[str] = None
@@ -1717,10 +2340,12 @@ def run_pipeline(options: PipelineOptions, progress: ProgressFn) -> Tuple[RunSum
                     selected=year_path,
                     year=year_str,
                     outputs_dir=out_dir,
-                    progress=progress,
+                    progress=_progress_year_eta_global_only,
                     progress_lo=lo,
                     progress_hi=hi,
                     subfolder_prefixes=subfolder_prefixes,
+                    explicit_metadata_file=explicit_meta_for_year,
+                    run_classification=options.run_classification,
                 )
                 total_summary.merge(part)
                 if syllable_path:
@@ -1732,10 +2357,11 @@ def run_pipeline(options: PipelineOptions, progress: ProgressFn) -> Tuple[RunSum
                     selected=year_path,
                     year=year_str,
                     resolve_wav_path_fn=resolve_wav_path,
-                    progress=progress,
+                    progress=_emit_overall_progress,
                     progress_base=lo,
                     progress_span=(hi - lo) * 0.9,
                     subfolder_prefixes=subfolder_prefixes,
+                    explicit_metadata_file=explicit_meta_for_year,
                 )
                 total_summary.merge(part)
 
@@ -1747,31 +2373,78 @@ def run_pipeline(options: PipelineOptions, progress: ProgressFn) -> Tuple[RunSum
                         selected=year_path,
                         year=year_str,
                         resolve_wav_path_fn=resolve_wav_path,
-                        progress=progress,
+                    progress=_emit_overall_progress,
                         progress_base=lo + (hi - lo) * 0.5,
                         progress_span=(hi - lo) * 0.5,
                         subfolder_prefixes=subfolder_prefixes,
+                        explicit_metadata_file=explicit_meta_for_year,
                     )
                     total_summary.merge(part)
                 if syllable_path and inv_rows:
-                    _emit_progress(progress, lo + (hi - lo) * 0.96, f"Year {year_str}: merging syllable counts...")
+                    _emit_overall_progress(lo + (hi - lo) * 0.96, f"Year {year_str}: merging syllable counts...")
                     merge_syllable_counts_from_excel(inv_rows, syllable_path)
                 meta_path = str(out_dir / f"recordings_metadata_{year_str}_{output_timestamp_suffix()}.xlsx")
-                _emit_progress(progress, lo + (hi - lo) * 0.98, f"Year {year_str}: writing metadata workbook...")
+                _emit_overall_progress(lo + (hi - lo) * 0.98, f"Year {year_str}: writing metadata workbook...")
                 save_metadata_inventory(meta_path, inv_rows)
                 total_summary.output_files.append(meta_path)
                 all_outputs.append(meta_path)
+            per_year_summary.append(_inventory_year_summary_row(inv_rows, year_str))
             years_with_outputs += 1
         except Exception as exc:
             msg = f"[{year_str}] {exc}"
             total_summary.error_messages.append(msg)
-            _emit_progress(progress, hi, f"Year {year_str}: failed ({exc}) — continuing to next year.")
+            _emit_overall_progress(hi, f"Year {year_str}: failed ({exc}) — continuing to next year.")
             continue
+
+    seg_merge_sources = _ordered_unique_per_year_segmentation_paths(total_summary.output_files)
+    if len(seg_merge_sources) > 1:
+        merge_stem = (
+            "segmentation_classification"
+            if options.run_classification
+            else "segmentation"
+        )
+        merged_path = out_dir / f"{merge_stem}_Multiple_Years_{output_timestamp_suffix()}.xlsx"
+        _merge_segmentation_workbooks(seg_merge_sources, merged_path)
+        merged_s = str(merged_path.resolve())
+        seg_set = set(seg_merge_sources)
+        total_summary.output_files = [p for p in total_summary.output_files if p not in seg_set]
+        total_summary.output_files.append(merged_s)
+        all_outputs = [p for p in all_outputs if p not in seg_set]
+        all_outputs.append(merged_s)
+        for p in seg_merge_sources:
+            try:
+                Path(p).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    if per_year_summary:
+        base_wb = _segmentation_workbook_for_summary_name(total_summary.output_files)
+        if base_wb is None:
+            base_wb = _metadata_workbook_for_summary_name(total_summary.output_files)
+        if base_wb is not None:
+            summary_path = base_wb.parent / f"{base_wb.stem}_summary.xlsx"
+        else:
+            summary_path = out_dir / f"processing_summary_{output_timestamp_suffix()}.xlsx"
+        save_processing_summary_workbook(str(summary_path), per_year_summary)
+        summary_abs = str(summary_path.resolve())
+        total_summary.output_files.append(summary_abs)
+        all_outputs.append(summary_abs)
 
     total_summary.output_directory = str(out_dir.resolve())
     if years_with_outputs == 0:
+        if years_skipped_by_empty_tree == len(pairs):
+            raise ValueError(
+                "No output files were produced: all selected years were skipped "
+                "because no folders are checked in the tree."
+            )
+        notes = "; ".join(total_summary.error_messages[:5]) if total_summary.error_messages else ""
+        if notes:
+            raise ValueError(
+                "No output files were produced for the selected years/folders. "
+                f"First errors: {notes}"
+            )
         raise ValueError("No output files were produced for the selected years/folders.")
-    _emit_progress(progress, 1.0, "All selected years finished.", 0.0)
+    _emit_overall_progress(1.0, "All selected years finished.", None)
     return total_summary, all_outputs
 
 
@@ -1784,7 +2457,9 @@ def execute_pipeline(
     want_syllables_xlsx: bool = True,
     want_metadata_xlsx: bool = True,
     metadata_only: bool = False,
+    run_classification: bool = True,
     subfolder_filters: Optional[Dict[str, List[str]]] = None,
+    metadata_file_overrides: Optional[Dict[str, str]] = None,
 ) -> Tuple[str, RunSummary]:
     """
     Backward-compatible wrapper. Returns (primary syllable xlsx path or first output, summary).
@@ -1798,7 +2473,9 @@ def execute_pipeline(
         want_syllables_xlsx=want_syllables_xlsx,
         want_metadata_xlsx=want_metadata_xlsx,
         metadata_only=metadata_only,
+        run_classification=run_classification,
         subfolder_filters=subfolder_filters,
+        metadata_file_overrides=metadata_file_overrides,
     )
 
     def _wrap(p: float, msg: str, eta: Optional[float] = None) -> None:
@@ -1810,7 +2487,7 @@ def execute_pipeline(
     summary, outputs = run_pipeline(opts, _wrap)
     primary = ""
     for p in outputs:
-        if "segmentation_" in Path(p).name and p.endswith(".xlsx"):
+        if _is_segmentation_workbook_path(p):
             primary = p
             break
     if not primary and outputs:

@@ -8,7 +8,7 @@ import logging
 import os
 
 import numpy as np
-import openpyxl
+import pandas as pd
 from tensorflow import keras
 
 from legacy.statistics_generator import Syl_Class_Vec
@@ -67,13 +67,14 @@ def classify_syllables(
     rec_num_syl: List,
     start_syl: List,
     end_syl: List,
+    wav_path_syl: Optional[List] = None,
     logger: Optional[logging.Logger] = None,
     year_audio_root: Optional[Path] = None,
-    progress_hook: Optional[Callable[[int, int], None]] = None,
+    progress_hook: Optional[Callable[..., None]] = None,
 ) -> np.ndarray:
     """Classify each syllable by generating spectrograms and running the CNN model.
 
-    For each syllable: loads the WAV, extracts the audio segment, applies a 30kHz
+    For each syllable: loads the recording audio, extracts the segment, applies a 30kHz
     high-pass filter, computes the STFT spectrogram, resizes to 128x128, and feeds
     it to the model. Results are grouped per recording as `sample` objects.
     """
@@ -90,6 +91,7 @@ def classify_syllables(
         rec_num_syl,
         start_syl,
         end_syl,
+        wav_paths=wav_path_syl,
         logger=logger,
         year_audio_root=year_audio_root,
         progress_hook=progress_hook,
@@ -130,28 +132,23 @@ def postprocess_predictions(
     return syl_num
 
 
-def _find_column(worksheet, name: str) -> Optional[int]:
-    """Return the 1-based column index for *name* in row 1, or None."""
-    for col in range(1, worksheet.max_column + 1):
-        if worksheet.cell(row=1, column=col).value == name:
-            return col
-    return None
-
-
 def write_syllable_numbers(file_path: str, syl_num: List[int]) -> None:
     """Write 'Syllable number' column to the segmentation Excel file.
 
     Idempotent: if the column already exists it is overwritten in place.
+
+    Uses pandas + a single ``to_excel`` pass. Per-cell openpyxl loops are far too slow
+    for tens of thousands of syllable rows (would stall the UI for hours).
     """
-    workbook = openpyxl.load_workbook(file_path)
-    worksheet = workbook.worksheets[0]
-    col = _find_column(worksheet, "Syllable number")
-    if col is None:
-        col = worksheet.max_column + 1
-    worksheet.cell(row=1, column=col).value = "Syllable number"
-    for idx, syl_val in enumerate(syl_num, start=2):
-        worksheet.cell(row=idx, column=col).value = syl_val
-    workbook.save(file_path)
+    df = pd.read_excel(file_path, sheet_name=0, engine="openpyxl")
+    n = len(df)
+    vals = list(syl_num)
+    if len(vals) < n:
+        vals.extend([LOW_CONFIDENCE_CLASS] * (n - len(vals)))
+    elif len(vals) > n:
+        vals = vals[:n]
+    df["Syllable number"] = vals
+    df.to_excel(file_path, index=False, engine="openpyxl")
 
 
 def run_classification(
@@ -168,11 +165,13 @@ def run_classification(
     rec_num_syl: List,
     start_syl: List,
     end_syl: List,
+    wav_path_syl: Optional[List] = None,
     logger: Optional[logging.Logger] = None,
     year_audio_root: Optional[Path] = None,
     *,
-    progress_hook: Optional[Callable[[int, int], None]] = None,
+    progress_hook: Optional[Callable[..., None]] = None,
     save_npy: bool = True,
+    stage_callback: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Run the full syllable classification pipeline and write results to Excel.
 
@@ -201,7 +200,11 @@ def run_classification(
     if logger:
         logger.info("Classification started")
 
+    if stage_callback is not None:
+        stage_callback("load_model")
     model = load_classification_model(model_path)
+    if stage_callback is not None:
+        stage_callback("model_ready")
 
     samples = classify_syllables(
         year,
@@ -216,6 +219,7 @@ def run_classification(
         rec_num_syl,
         start_syl,
         end_syl,
+        wav_path_syl=wav_path_syl,
         logger=logger,
         year_audio_root=year_audio_root,
         progress_hook=progress_hook,
@@ -225,9 +229,15 @@ def run_classification(
 
     output_npy: Optional[str] = save_raw_predictions(file_path, samples) if save_npy else None
 
+    if stage_callback is not None:
+        stage_callback("postprocess")
     syl_num = postprocess_predictions(samples, logger=logger)
 
+    if stage_callback is not None:
+        stage_callback("write_excel")
     write_syllable_numbers(file_path, syl_num)
+    if stage_callback is not None:
+        stage_callback("write_done")
 
     if logger:
         logger.info(f"Classification finished (syllables={len(syl_num)})")
