@@ -463,8 +463,15 @@ def _scan_audio_files(
     progress: Optional[ProgressFn] = None,
     progress_p: float = 0.05,
     year: str = "",
+    dataset_root: Optional[Path] = None,
+    subfolder_prefixes: Optional[List[str]] = None,
 ) -> List[Path]:
-    """Collect supported recording files (currently ``.wav``/``.wave``) under ``root``; optional progress while walking."""
+    """Collect supported recording files (currently ``.wav``/``.wave``) under ``root``; optional progress while walking.
+
+    When ``subfolder_prefixes`` is set (including ``[]``), paths are restricted with
+    ``wav_matches_subfolder_prefixes`` before the progress line so the count matches
+    the UI folder selection, not the whole year tree.
+    """
     wav_ext = {".wav", ".wave"}
     found: List[Path] = []
     prefix = f"[{year}] " if year else ""
@@ -473,13 +480,29 @@ def _scan_audio_files(
             if Path(fn).suffix.lower() not in wav_ext:
                 continue
             found.append(Path(dirpath) / fn)
+
+    root_resolved = root.resolve()
+    scanned_n = len(found)
+    if subfolder_prefixes is not None:
+        found = [
+            p
+            for p in found
+            if wav_matches_subfolder_prefixes(
+                p.resolve(), root_resolved, dataset_root, year, subfolder_prefixes
+            )
+        ]
+
     if progress is not None:
-        _emit_progress(
-            progress,
-            progress_p,
-            f"{prefix}{len(found)} audio recordings found",
-            None,
-        )
+        if subfolder_prefixes is None:
+            msg = f"{prefix}{len(found)} audio recordings found"
+        elif scanned_n != len(found):
+            msg = (
+                f"{prefix}{len(found)} audio recordings found under selected folder(s) "
+                f"({scanned_n} total under year folder)"
+            )
+        else:
+            msg = f"{prefix}{len(found)} audio recordings found under selected folder(s)"
+        _emit_progress(progress, progress_p, msg, None)
     return sorted(found, key=lambda p: str(p).lower())
 
 
@@ -752,7 +775,7 @@ def _meta_row(meta: Dict[str, List], i: int) -> Tuple[str, str, str, str, str, i
     sex = str(g("Sex")).strip()
     pupgen = str(g("Offspring Genotype")).strip()
     day = _to_int(g("Day"))
-    session = _to_int(g("Session"))
+    session = _normalize_session_value(_to_int(g("Session")))
     rec = g("Recording Number")
     rec_str = str(rec).strip()
     if rec_str.endswith(".0") and rec_str.replace(".0", "").isdigit():
@@ -771,6 +794,11 @@ def _to_int(v: Any) -> int:
         return int(float(str(v).strip()))
     except (TypeError, ValueError):
         return 0
+
+
+def _normalize_session_value(session: int) -> int:
+    """Use 1 when Session is missing, unparsed, or non-positive (Day still defaults via _to_int → 0)."""
+    return session if session > 0 else 1
 
 
 def _excel_path_from_resolved_wav(dataset_root: Path, wav: Path, year: str) -> str:
@@ -881,7 +909,7 @@ def _extract_row_metadata_from_path_layout(
                 session = _extract_number(token)
         rec_num = stem
         sex = _guess_sex(name)
-        return mother, matgen, name, sex, pupgen, day, session, rec_num
+        return mother, matgen, name, sex, pupgen, day, _normalize_session_value(session), rec_num
 
     if len(folders) >= 4:
         mother, matgen = _split_pair(folders[0], "UnknownMother", "UNK")
@@ -912,7 +940,7 @@ def _extract_row_metadata_from_path_layout(
 
     rec_num = stem
     sex = _guess_sex(name)
-    return mother, matgen, name, sex, pupgen, day, session, rec_num
+    return mother, matgen, name, sex, pupgen, day, _normalize_session_value(session), rec_num
 
 
 def _split_pair(value: str, default_left: str, default_right: str) -> Tuple[str, str]:
@@ -1867,7 +1895,12 @@ def process_single_year(
                 None,
             )
             wav_list = _scan_audio_files(
-                selected, progress=progress, progress_p=span_t(0.05), year=year
+                selected,
+                progress=progress,
+                progress_p=span_t(0.05),
+                year=year,
+                dataset_root=dataset_root,
+                subfolder_prefixes=subfolder_prefixes,
             )
             if not wav_list:
                 if not inventory and total_calls == 0:
@@ -1875,13 +1908,7 @@ def process_single_year(
                         f"[{year}] No audio recordings found and no usable metadata rows."
                     )
             else:
-                filtered_wavs = [
-                    wp.resolve()
-                    for wp in wav_list
-                    if wav_matches_subfolder_prefixes(
-                        wp.resolve(), selected, dataset_root, year, subfolder_prefixes
-                    )
-                ]
+                filtered_wavs = [wp.resolve() for wp in wav_list]
                 row_wall_times.clear()
                 scan_n = max(1, len(filtered_wavs))
                 for idx, wp in enumerate(filtered_wavs, start=1):

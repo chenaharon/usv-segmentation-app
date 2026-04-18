@@ -18,6 +18,7 @@ build/
 build_portable/
 dist_portable/
 dist_installer/
+dist_installer_stage/
 dist_installer_macos/
 outputs_test_run/
 *.spec.bak
@@ -54,3 +55,6 @@ models/model_weights.h6/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local / generated docs (not distributed via repo)
+docs/SEGMENTATION_CLASSIFICATION_HE.html
