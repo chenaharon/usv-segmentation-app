@@ -543,6 +543,7 @@ else:
         <li><code>Syllable number</code> – תוצאת המחלקה המספרית (כולל 10).</li>
         <li><code>Syllable type</code> – שם המחלקה לפי מיפוי קשיח.</li>
         <li><code>Complexity level</code>, <code>Complexity level (numeric)</code>.</li>
+<<<<<<< HEAD
         <li><code>Genotype Group</code>, <code>Genotype Group (numeric)</code> – שילוב גנוטיפ אם וצאצא לקבוצה אחת לניתוח.</li>
         <li><code>Duration</code>, <code>ISI/ICI</code>, <code>Start Point (Hz)</code>, <code>End Point (Hz)</code>.</li>
       </ul>
@@ -557,10 +558,21 @@ else:
       <p>
         העמודה <code>Genotype Group (numeric)</code> נותנת קוד מספרי לקומבינציות מחקריות מרכזיות בלבד,
         וכל קומבינציה אחרת (כולל UNK/NAN ו-WT-HT) מקבלת <code>0</code>:
+=======
+        <li><code>Mother Genotype (binary)</code>, <code>Offspring Genotype (binary)</code> – קידוד בינארי: <code>HT=1</code>, כל ערך אחר (כולל <code>WT</code>, <code>UNK</code>, <code>NAN</code>) <code>=0</code>.</li>
+        <li><code>Duration</code>, <code>ISI/ICI</code>, <code>Start Point (Hz)</code>, <code>End Point (Hz)</code>.</li>
+      </ul>
+
+      <h3>קידוד בינארי של Genotype</h3>
+      <p>
+        העמודות <code>Mother Genotype (binary)</code> ו-<code>Offspring Genotype (binary)</code> משמשות כקידוד מספרי קצר של הגנוטיפ
+        עבור ניתוחים סטטיסטיים. הכלל הוא חד-משמעי:
+>>>>>>> b371126 (Normalize binary genotype encoding to HT=1 (Issue #3).)
       </p>
       <table class="table">
         <thead>
           <tr>
+<<<<<<< HEAD
             <th>Mother Genotype</th>
             <th>Offspring Genotype</th>
             <th>Genotype Group</th>
@@ -578,6 +590,22 @@ else:
       </table>
       <p class="muted">
         העמודה הזו ממוקמת בקובץ הסגמנטציה בין <code>Offspring Genotype (binary)</code> ל-<code>Supplement (Offspring)</code>.
+=======
+            <th>ערך גנוטיפ</th>
+            <th>קידוד בינארי</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>HT</td><td>1</td></tr>
+          <tr><td>WT</td><td>0</td></tr>
+          <tr><td>UNK</td><td>0</td></tr>
+          <tr><td>NAN / חסר תיעוד</td><td>0</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">
+        כלומר העמודה הבינארית מסמנת את הנוכחות של <code>HT</code> בלבד. כל ערך אחר (כולל ערכים חסרים
+        או לא ידועים) ממופה ל-<code>0</code>, כדי לאפשר ניתוח קל לפי <em>HT vs. non-HT</em>.
+>>>>>>> b371126 (Normalize binary genotype encoding to HT=1 (Issue #3).)
       </p>
     </div>
 
