@@ -21,14 +21,22 @@ SYLLABLE_TYPE_MAP = {
 
 _SINGLE_VOWEL = {0, 4, 5, 7, 8, 9}
 _MULTIPLE_VOWELS = {1, 3}
-_ADVANCED_HARMONIC = {2, 6, 10}
+_ADVANCED_HARMONIC = {2, 6}
+_UNDEFINED = {10}
 
 
 def _complexity_numeric(syl_num) -> Optional[int]:
-    """Map a syllable number to its complexity level (1/2/3)."""
+    """Map a syllable number to its complexity level (0/1/2/3).
+
+    Class 10 (low-confidence/Undefined) is reported as its own complexity
+    level 0 instead of being folded into Advanced Harmonic, so analyses can
+    treat it as a distinct category.
+    """
     if pd.isna(syl_num):
         return None
     syl_num = int(syl_num)
+    if syl_num in _UNDEFINED:
+        return 0
     if syl_num in _SINGLE_VOWEL:
         return 1
     if syl_num in _MULTIPLE_VOWELS:
@@ -38,7 +46,12 @@ def _complexity_numeric(syl_num) -> Optional[int]:
     return None
 
 
-_COMPLEXITY_TEXT = {1: "Single Vowel", 2: "Multiple Vowels", 3: "Advanced Harmonic"}
+_COMPLEXITY_TEXT = {
+    0: "Undefined",
+    1: "Single Vowel",
+    2: "Multiple Vowels",
+    3: "Advanced Harmonic",
+}
 
 # Written by CNN / fallback classification; omitted in segmentation-only runs.
 SYLLABLE_CLASSIFICATION_OUTPUT_COLUMNS = (

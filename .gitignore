@@ -55,6 +55,3 @@ models/model_weights.h6/
 
 # Jupyter
 .ipynb_checkpoints/
-
-# Local / generated docs (not distributed via repo)
-docs/SEGMENTATION_CLASSIFICATION_HE.html
