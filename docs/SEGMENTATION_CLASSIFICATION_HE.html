@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>תיעוד לוגיקה וביולוגיה: סגמנטציה וקלסיפיקציה</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #22c55e;
+      --border: #1f2937;
+      --code: #0b1220;
+    }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.75;
+    }
+    .wrap {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      margin-bottom: 16px;
+    }
+    h1, h2, h3 {
+      margin-top: 0;
+      color: #f8fafc;
+    }
+    h1 { font-size: 1.9rem; }
+    h2 { font-size: 1.35rem; margin-top: 10px; }
+    h3 { font-size: 1.08rem; margin-top: 12px; }
+    a { color: #93c5fd; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    ul, ol { margin-top: 8px; }
+    code, pre {
+      font-family: Consolas, "Courier New", monospace;
+      background: var(--code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    code { padding: 1px 6px; }
+    pre {
+      padding: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .muted { color: var(--muted); }
+    .note {
+      border-right: 4px solid var(--accent);
+      padding-right: 10px;
+    }
+    .warn {
+      border-right: 4px solid #f59e0b;
+      padding-right: 10px;
+    }
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+    }
+    .table th, .table td {
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: right;
+      vertical-align: top;
+    }
+    .table th { background: #0b1220; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>מסמך ליבה: לוגיקה חישובית + פרשנות ביולוגית</h1>
+      <p>
+        מסמך זה נועד להיות מקור קריאה אחד שמסביר לעומק גם <strong>מה האלגוריתם עושה בפועל</strong>
+        וגם <strong>איך לפרש ביולוגית את התוצאות</strong>.
+        הוא מבוסס על מימוש הקוד בפרויקט ועל שני המאמרים:
+        <code>Shekel et al., 2021</code>, <code>Gal et al., 2023</code>.
+      </p>
+      <p class="note">
+        עיקרון מנחה: הפרדה ברורה בין מה שהמודל "מנבא", מה שהקוד "ממפה", ומה שניתן להסיק מחקרית.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>לפני שמתחילים: איך לקרוא את המסמך הזה</h2>
+      <ul>
+        <li>אם את/ה חדש/ה בתחום: התחילו בסעיפים <code>1</code>, <code>3</code>, <code>6</code>, <code>9</code>, ואז עברו למילון בסעיף <code>15</code>.</li>
+        <li>המילה <strong>הקלטה</strong> = קובץ WAV מלא; המילה <strong>סילבה</strong> = אירוע קולי קצר מתוך ההקלטה.</li>
+        <li>המילה <strong>שלב ההקלטה</strong> (ולא "רכישה") = השלב שבו המערכת מקליטה מהמיקרופון ושומרת קובץ שמע.</li>
+        <li>המילה <strong>סגמנטציה</strong> = "לחתוך" את ההקלטה לאירועים קוליים נפרדים.</li>
+        <li>המילה <strong>קלסיפיקציה</strong> = לתת לכל סילבה תווית סוג (למשל Flat/Upward/Short).</li>
+      </ul>
+      <p class="muted">
+        טיפ: אם נתקלים במונח לא ברור, קופצים ישר ל"מילון מונחים" בסעיף 15 וחוזרים לקריאה.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>תוכן עניינים</h2>
+      <ul>
+        <li><a href="#pipeline">1) התהליך המלא מקצה לקצה (מהקלטה ועד Excel)</a></li>
+        <li><a href="#scan">2) איך הקלטה נסרקת ומותאמת למטאדאטה</a></li>
+        <li><a href="#segmentation">3) סגמנטציה: איך מוצאים סילבות בפועל</a></li>
+        <li><a href="#no-syllables">4) למה יש הקלטות בלי סילבות</a></li>
+        <li><a href="#features">5) אילו חישובים מבוצעים לכל סילבה</a></li>
+        <li><a href="#classification">6) קלסיפיקציה: סוג סילבה + סף ביטחון</a></li>
+        <li><a href="#mapping">7) מיפוי מחלקות, סוגים ורמות מורכבות</a></li>
+        <li><a href="#libraries">8) ספריות וחבילות שמשתתפות בתהליך</a></li>
+        <li><a href="#params-origin">9) מי קבע את הפרמטרים ומה ידוע על מקורם</a></li>
+        <li><a href="#model-origin">10) מאיפה הגיע המודל והמשקלים</a></li>
+        <li><a href="#bio">11) המשמעות הביולוגית לפי המאמרים</a></li>
+        <li><a href="#research-guidelines">12) איך לפרש נכון את הפלט במחקר</a></li>
+        <li><a href="#outputs">13) פלטים ועמודות מרכזיות בקבצי התוצאה</a></li>
+        <li><a href="#open-questions">14) שאלות רשמיות לחוקרת (לסגירת פערי מידע)</a></li>
+        <li><a href="#glossary">15) מילון מונחים קצר (לעבודה יומיומית)</a></li>
+      </ul>
+    </div>
+
+    <div class="card" id="pipeline">
+      <h2>1) התהליך המלא מקצה לקצה (מהקלטה ועד Excel)</h2>
+      <ol>
+        <li>המערכת מזהה את שנות העבודה (למשל תיקיות <code>2015</code>, <code>2018</code>, ...), או עובדת על שנה בודדת שנבחרה.</li>
+        <li>לכל שנה קוראים קבצי מטאדאטה (Excel) ומנסים להתאים כל שורה לקובץ WAV ספציפי לפי: אם, גנוטיפ, שם גור, יום, סשן ומספר הקלטה.</li>
+        <li>אם אין מטאדאטה שמיש, יש מסלול fallback שסורק פיזית את עץ התיקיות ומחלץ מזהים מנתיב הקובץ עצמו.</li>
+        <li>כל הקלטה נטענת ב-<code>librosa.load(..., sr=250000)</code>, כלומר רה-דגימה לקצב קבוע של 250kHz.</li>
+        <li>מתבצעת סגמנטציה: זיהוי חלונות זמן שהם "אירוע קולי", איחוד חלונות סמוכים וסינון אורכים קצרים מדי.</li>
+        <li>נכתב קובץ <code>segmentation_*.xlsx</code> (או <code>segmentation_classification_*.xlsx</code>) עם זמני התחלה/סיום לכל סילבה.</li>
+        <li>מחושבים פיצ'רים בסיסיים: <code>ISI_time</code>, <code>Start Point (Hz)</code>, <code>End Point (Hz)</code>.</li>
+        <li>אם סיווג מופעל: כל סילבה מומרת לספקטרוגרמה, מוזנת ל-CNN ומקבלת <code>Syllable number</code> (0..9 או 10).</li>
+        <li>לבסוף מתבצעת העשרת עמודות: סוג סילבה טקסטואלי, Complexity, Strain, Noise, אינדקסים וסיכומי הקלטה.</li>
+      </ol>
+      <p class="muted">
+        בפועל זה pipeline היברידי: שלבי סגמנטציה ופיצ'רים הם דטרמיניסטיים (חוקים), והקלסיפיקציה היא הסתברותית (מודל CNN + סף החלטה).
+      </p>
+    </div>
+
+    <div class="card" id="scan">
+      <h2>2) איך הקלטה נסרקת ומותאמת למטאדאטה</h2>
+      <h3>2.1 התאמת שורת מטאדאטה ל-WAV</h3>
+      <ul>
+        <li>המערכת מחפשת קבצי Excel "מקור" (לא קבצי פלט של הפייפליין) בתיקיית השנה וברמה אחת מתחתיה.</li>
+        <li>שדות הבסיס הם: <code>Mother</code>, <code>Mother Genotype</code>, <code>Name</code>, <code>Sex</code>, <code>Offspring Genotype</code>, <code>Day</code>, <code>Session</code>, <code>Recording Number</code>.</li>
+        <li>יש נרמול לערכים: למשל <code>Session</code> לא תקין הופך ל-1, ו-<code>Recording Number</code> כמו <code>12.0</code> מנוקה ל-<code>12</code>.</li>
+        <li>סקס מושלם קודם מה-Excel; אם חסר/לא תקין, יש fallback דרך טבלאות "סיכום גורים" ואחר כך דרך ניחוש משם (<code>...M</code>/<code>...F</code>).</li>
+      </ul>
+
+      <h3>2.2 מה קורה אם ההתאמה נכשלת</h3>
+      <ul>
+        <li>אם לא נמצא WAV לשורת מטאדאטה: השורה תירשם כ-<code>Recording file not found</code> ב-inventory.</li>
+        <li>אם נמצא WAV אבל הוא מחוץ לתת-התיקיות שנבחרו: השורה תירשם כ-<code>Skipped (subfolder filter)</code>.</li>
+        <li>אם אין בכלל מטאדאטה שמיש: הפייפליין מבצע סריקת קבצים מלאה ו"מחלץ" Mother/Name/Day/Session מהנתיב עצמו.</li>
+      </ul>
+    </div>
+
+    <div class="card" id="segmentation">
+      <h2>3) סגמנטציה: איך מוצאים סילבות בפועל</h2>
+      <h3>3.1 פרמטרים קשיחים בסגמנטציה</h3>
+      <table class="table">
+        <thead>
+          <tr><th>פרמטר</th><th>ערך</th><th>איפה בקוד</th><th>תפקיד</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Sampling rate</td><td>250000 Hz</td><td><code>librosa.load(..., sr=250000)</code></td><td>אחידות לכל ההקלטות</td></tr>
+          <tr><td>Frame length</td><td>0.006 sec</td><td><code>FRAME_LENGTH</code></td><td>גודל חלון לחיפוש אירועים</td></tr>
+          <tr><td>Overlap</td><td>0.7</td><td><code>OVERLAP</code></td><td>צפיפות חלונות לאורך הזמן</td></tr>
+          <tr><td>Silence threshold</td><td>20</td><td><code>THRESH</code></td><td>סף זיהוי פריים כקולי/שקט</td></tr>
+          <tr><td>Harmony threshold</td><td>0.009</td><td><code>HARMONY_TH</code></td><td>סף לזיהוי מרכיב הרמוני</td></tr>
+          <tr><td>Min syllable length</td><td>0.01 sec</td><td><code>MIN_LENGTH</code></td><td>סינון אירועים קצרים מדי</td></tr>
+          <tr><td>Merge gap</td><td>&lt; 0.02 sec</td><td><code>MIN_BETWEEN_CALL</code></td><td>איחוד אירועים קרובים</td></tr>
+        </tbody>
+      </table>
+
+      <h3>3.2 שלבי החישוב בסגמנטציה</h3>
+      <ol>
+        <li><strong>Preprocessing:</strong> הורדת ממוצע, low-pass FIR, ואז band-stop סביב ~50kHz להפחתת רעש תשתית.</li>
+        <li><strong>Trim leading silence:</strong> אם יש רצף אפסים בתחילת האות, מקצצים אותו כדי לא להטות גילוי.</li>
+        <li><strong>Framing:</strong> חיתוך האות לחלונות זמן חופפים.</li>
+        <li><strong>ERB/Gammatone filterbank:</strong> לכל חלון מחשבים תגובה בבנק פילטרים המדמה חלוקה קוכלארית.</li>
+        <li><strong>Peak logic:</strong> מחפשים פיקים אנרגטיים בתדר ומסיקים אם החלון קולי.</li>
+        <li><strong>Gap filling:</strong> אם יש חורים קצרים (עד 4 פריימים) בין חלונות קוליים, ממלאים אותם כדי לשמור רציפות.</li>
+        <li><strong>Rearrange + Length check:</strong> בונים זוגות Start/End, מאחדים שכנים קרובים ומוחקים קטעים קצרים מדי.</li>
+      </ol>
+      <p class="muted">
+        במילים פשוטות: המערכת "סורקת" את ההקלטה בחלונות קטנים, מסמנת איפה יש קול אמיתי, ואז מחברת/מנקה את התוצאה כדי לקבל סילבות יציבות.
+      </p>
+    </div>
+
+    <div class="card" id="no-syllables">
+      <h2>4) למה יש הקלטות בלי סילבות</h2>
+      <p>
+        "אין סילבות" הוא תוצר לגיטימי של האלגוריתם, ולא בהכרח שגיאה. בקוד זה מוגדר כמצב שבו
+        <code>segment_single_recording(...)</code> מחזיר רשימה ריקה.
+      </p>
+      <h3>סיבות נפוצות בקוד</h3>
+      <ul>
+        <li>אין מספיק אנרגיה קולית שעוברת את ספי הזיהוי בפריימים (<code>THRESH</code>, <code>harmony_th</code>).</li>
+        <li>נמצאו אירועים קצרים מאוד, אך הם נפסלים כי <code>duration &lt; 0.01s</code>.</li>
+        <li>אירועים מפורקים/רועשים לא שומרים על רציפות תדרית/זמנית לאחר שלבי המיזוג והסינון.</li>
+        <li>הקלטה באמת שקטה, רעש בלבד, או איכות הקלטה נמוכה.</li>
+      </ul>
+      <p class="note">
+        חשוב: "אין סילבות" שונה מ"שגיאת סגמנטציה". במקרה שגיאה הקובץ נספר כ-<code>wav_segmentation_failed</code>;
+        במקרה ללא אירועים הוא נספר כ-<code>recordings_with_zero_syllables</code>.
+      </p>
+    </div>
+
+    <div class="card" id="features">
+      <h2>5) אילו חישובים מבוצעים לכל סילבה</h2>
+      <h3>5.1 משך ו-ISI</h3>
+      <ul>
+        <li><code>Duration (time) = End - Start</code>.</li>
+        <li><code>ISI_time</code> מחושב כהפרש בין התחלת הסילבה הנוכחית לסיום הקודמת באותה הקלטה.</li>
+      </ul>
+
+      <h3>5.2 תדר התחלה/סיום (Start/End Point Hz)</h3>
+      <ul>
+        <li>לוקחים חלון של ~2000 דגימות סביב זמן ההתחלה, ועוד חלון סביב זמן הסיום.</li>
+        <li>מריצים Welch PSD (<code>scipy.signal.welch</code>) עם התאמת <code>nperseg/noverlap</code> לאורך הקטע בפועל.</li>
+        <li>מחפשים פיק ספקטרלי דומיננטי מעל 40kHz בעזרת <code>find_peaks</code>.</li>
+        <li>אם לא נמצא פיק תקף, נכתב <code>0</code> (לרוב מתבטא גם בעמודת <code>Noise</code> אחרי ההעשרה).</li>
+      </ul>
+    </div>
+
+    <div class="card" id="classification">
+      <h2>6) קלסיפיקציה: סוג סילבה + סף ביטחון</h2>
+      <h3>6.1 הכנת כל סילבה ל-CNN</h3>
+      <ul>
+        <li>טוענים את הקטע מתוך ההקלטה; אם הסילבה קצרה מ-0.25 שניות, מוסיפים "padding" של שקט משני הצדדים.</li>
+        <li>High-pass Butterworth מסדר 6 עם cutoff של 30kHz (<code>scipy.signal.butter</code> + <code>lfilter</code>).</li>
+        <li>STFT עם <code>n_fft=2048</code>, <code>hop_length=128</code>, <code>win_length=512</code>, חלון Hamming.</li>
+        <li>Resize ל-<code>128x128</code> באמצעות <code>cv2.INTER_CUBIC</code>.</li>
+        <li>נרמול: <code>D = D - 0.02*mean(D)</code>, שכפול ל-3 ערוצים, <code>float32</code>, חלוקה ב-255.</li>
+      </ul>
+
+      <h3>6.2 כלל ההחלטה אם זו סילבה מסוג מסוים או Undefined</h3>
+      <p>
+        המודל מחזיר וקטור הסתברויות למחלקות 0..9 לכל סילבה. אחר כך מופעל כלל הכרעה קשיח:
+      </p>
+      <pre>
+if max(probabilities) &lt; 0.5:
+    class = 10
+else:
+    class = argmax(probabilities)
+      </pre>
+      <ul>
+        <li><strong>מחלקה 10</strong> היא fallback של <em>low confidence</em> (אי-ודאות/רעש/התאמה חלשה למודל).</li>
+        <li>סף הביטחון <code>0.5</code> מקודד בקבוע <code>CONFIDENCE_THRESHOLD</code>.</li>
+        <li>אם המודל לא נטען בכלל (קובץ חסר/שגיאה), הפייפליין ממלא את כל <code>Syllable number</code> בערך 10.</li>
+      </ul>
+      <p class="muted">
+        אינטואיטיבית: אם המודל "לא מספיק בטוח בעצמו", הוא מעדיף להגיד "לא יודע" (10) במקום לתת תווית שגויה בביטחון מזויף.
+      </p>
+    </div>
+
+    <div class="card" id="mapping">
+      <h2>7) מיפוי מחלקות, סוגים ורמות מורכבות</h2>
+      <p>המיפוי בקוד לעמודה <code>Syllable type</code>:</p>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>מספר מחלקה</th>
+            <th>שם סוג סילבה</th>
+            <th>הערת פרשנות</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>0</td><td>Complex</td><td>ניבוי CNN</td></tr>
+          <tr><td>1</td><td>Frequency steps</td><td>ניבוי CNN</td></tr>
+          <tr><td>2</td><td>Composite</td><td>ניבוי CNN</td></tr>
+          <tr><td>3</td><td>Two syllables</td><td>ניבוי CNN</td></tr>
+          <tr><td>4</td><td>Upward</td><td>ניבוי CNN</td></tr>
+          <tr><td>5</td><td>Flat</td><td>ניבוי CNN</td></tr>
+          <tr><td>6</td><td>Harmonic</td><td>ניבוי CNN</td></tr>
+          <tr><td>7</td><td>Downward</td><td>ניבוי CNN</td></tr>
+          <tr><td>8</td><td>Chevron</td><td>ניבוי CNN</td></tr>
+          <tr><td>9</td><td>Short</td><td>ניבוי CNN</td></tr>
+          <tr><td>10</td><td>Undefined</td><td>Fallback של confidence</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">
+        כלומר: שם הסוג הוא תווית שמקבלת המחלקה המספרית, ולא תוצאה של חוק חישובי נפרד.
+      </p>
+      <h3>קיבוץ ל-Complexity</h3>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Complexity</th>
+            <th>ערך מספרי</th>
+            <th>מחלקות שנכנסות</th>
+            <th>משמעות כללית</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Undefined</td>
+            <td>0</td>
+            <td>10</td>
+            <td>סילבות שסווגו כ-Undefined (low confidence) — קבוצה נפרדת ולא מתערבבת עם הרמות 1/2/3</td>
+          </tr>
+          <tr>
+            <td>Single Vowel</td>
+            <td>1</td>
+            <td>0, 4, 5, 7, 8, 9</td>
+            <td>קריאות "פשוטות" יחסית, רכיב מרכזי יחיד</td>
+          </tr>
+          <tr>
+            <td>Multiple Vowels</td>
+            <td>2</td>
+            <td>1, 3</td>
+            <td>קריאות עם רכיב/מעבר מרובה</td>
+          </tr>
+          <tr>
+            <td>Advanced Harmonic</td>
+            <td>3</td>
+            <td>2, 6</td>
+            <td>קריאות הרמוניות מורכבות</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="note">
+        מחלקה <code>10</code> (Undefined / low confidence) מוקצית לרמת מורכבות נפרדת
+        <code>0</code> בשם <code>Undefined</code>, ולא משויכת ל-Advanced Harmonic.
+        כך שיעור ה-Undefined תמיד נשמר נפרד וניתן לדיווח עצמאי בניתוח מדעי.
+      </p>
+    </div>
+
+    <div class="card" id="libraries">
+      <h2>8) ספריות וחבילות שמשתתפות בתהליך</h2>
+      <ul>
+        <li><code>librosa</code> – טעינת אודיו, רה-דגימה, STFT.</li>
+        <li><code>numpy</code> – עיבוד מטריצות, חישובי זמנים ותדרים.</li>
+        <li><code>scipy.signal</code> – פילטרים, Welch PSD, איתור פיקים.</li>
+        <li><code>tensorflow / keras</code> – טעינת מודל וסיווג CNN.</li>
+        <li><code>opencv (cv2)</code> – שינוי גודל ספקטרוגרמה ל-128x128.</li>
+        <li><code>openpyxl</code>, <code>pandas</code> – קריאה/כתיבה/העשרת Excel.</li>
+        <li><code>sk_dsp_comm</code> (בקוד legacy) – תכנון FIR filters בסגמנטציה.</li>
+      </ul>
+    </div>
+
+    <div class="card" id="params-origin">
+      <h2>9) מי קבע את הפרמטרים ומה ידוע על מקורם</h2>
+      <p>
+        בפועל, הפרמטרים מקודדים בקוד (hard-coded) ומגיעים מקבצי legacy שנוצרו מתוך מחברות Colab,
+        ולא מתוך קובץ קונפיגורציה מתועד.
+      </p>
+      <h3>9.1 עוגן מחקרי מתוך המאמרים (Shekel 2021, Gal 2023)</h3>
+      <ul>
+        <li>שני המאמרים מתארים הקלטה ב-<code>250 kHz</code> עם מערכת Avisoft, וטריגר על אנרגיה בתחום <code>10–250 kHz</code>.</li>
+        <li>במאמר 2023 מתואר אלגוריתם סגמנטציה המבוסס על חלונות קצרים, FFT וחציית סף אנרגיה.</li>
+        <li>במאמרים מודגש שהמדדים הקריטיים לניתוח הם Start/End Frequency, Duration, Bandwidth ו-ICI.</li>
+      </ul>
+
+      <h3>9.2 "למה זה ככה" – הסבר פרמטרים שלב-אחר-שלב</h3>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>פרמטר</th>
+            <th>הערך במערכת</th>
+            <th>למה בחרו בו (היגיון הנדסי/ביולוגי)</th>
+            <th>רמת ודאות מקור</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Sampling rate</td>
+            <td><code>250kHz</code></td>
+            <td>רוב קריאות הגורים נמצאות בערך בין 30–90kHz, אבל דגימה ב-250kHz נותנת מרווח ביטחון עד 125kHz (Nyquist), כך שלא מפספסים חריגים/הרמוניות ושומרים דיוק תדרי טוב.</td>
+            <td>מופיע מפורשות בשני המאמרים + עקבי עם עקרון Nyquist.</td>
+          </tr>
+          <tr>
+            <td>Trigger energy threshold (שלב ההקלטה)</td>
+            <td><code>0.5% energy, 10–250kHz</code></td>
+            <td>זה "שער כניסה" בזמן ההקלטה: המערכת מתחילה לשמור קטעים רק כשיש מספיק אנרגיה אולטרסונית, כדי לצמצם שקט ורעש רקע.</td>
+            <td>מופיע מפורשות במאמרים (שלב ההקלטה, לא שלב הסגמנטציה בקוד).</td>
+          </tr>
+          <tr>
+            <td>Frame length</td>
+            <td><code>0.006s</code></td>
+            <td>חלון קצר מספיק כדי ללכוד דינמיקה מהירה של USV, אך ארוך מספיק ליציבות ספקטרלית; זה איזון זמן-תדר קלאסי ב-spectrogram/STFT.</td>
+            <td>מופיע בקוד (legacy); ההיגיון נתמך ע"י עקרונות spectrogram כלליים.</td>
+          </tr>
+          <tr>
+            <td>Overlap</td>
+            <td><code>0.7</code></td>
+            <td>חפיפה גבוהה אומרת "לבדוק את אותו אזור בזמן יותר מפעם אחת". כך פחות מפספסים התחלה/סיום של סילבות מהירות.</td>
+            <td>מופיע בקוד; rationale הנדסי כללי (DSP/spectrogram).</td>
+          </tr>
+          <tr>
+            <td>Silence / detection threshold</td>
+            <td><code>THRESH=20</code></td>
+            <td>סף שמחליט אם חלון נחשב "יש קול" או "אין קול". גבוה מדי יפספס קריאות חלשות; נמוך מדי יתייג רעש כקריאה.</td>
+            <td>מופיע בקוד; לא נמצא במאמרים ערך כיול מתמטי מפורט לערך 20.</td>
+          </tr>
+          <tr>
+            <td>Harmony threshold</td>
+            <td><code>0.009</code></td>
+            <td>סף ייעודי לאיתור רכיב/מבנה הרמוני; מטרתו לשפר זיהוי קריאות מורכבות מעבר לתדר בסיסי יחיד.</td>
+            <td>מופיע בקוד; rationale חלקי מתוך לוגיקת האלגוריתם.</td>
+          </tr>
+          <tr>
+            <td>Min syllable length</td>
+            <td><code>0.01s</code></td>
+            <td>מסנן אירועים קצרים מדי שסביר שהם noise spikes ולא קריאות ביולוגיות יציבות.</td>
+            <td>מופיע בקוד (Check_length_Call).</td>
+          </tr>
+          <tr>
+            <td>Merge gap</td>
+            <td><code>0.02s</code></td>
+            <td>אם המרווח בין שני אירועים קטן מאוד, מאחדים אותם לסילבה אחת כדי למנוע פיצול יתר של אותה קריאה.</td>
+            <td>מופיע בקוד (Check_length_Call).</td>
+          </tr>
+          <tr>
+            <td>High-pass filter (classification)</td>
+            <td><code>30kHz</code>, order 6</td>
+            <td>מדכא רכיבים נמוכים שאינם מרכזיים ל-USV של גורים, ומשאיר את התוכן האולטרסוני שמעניין לסיווג.</td>
+            <td>מופיע בקוד; עקבי עם ההגדרה הביולוגית של USV מעל ~30kHz.</td>
+          </tr>
+          <tr>
+            <td>STFT params</td>
+            <td><code>n_fft=2048</code>, <code>hop=128</code>, <code>win=512</code></td>
+            <td>נבחרים כדי לאזן רזולוציית תדר וזמן עבור תבניות סילבה. hop קטן נותן רציפות זמן טובה; חלון/FFT מאפשרים הפרדה ספקטרלית שימושית למודל.</td>
+            <td>מופיע בקוד; rationale מבוסס עקרונות STFT.</td>
+          </tr>
+          <tr>
+            <td>Spectrogram size</td>
+            <td><code>128x128</code>, 3 channels</td>
+            <td>אחידות ממדית לקלט CNN, ושימוש בתצורה סטנדרטית של תמונה לצורך אינפרנס יציב ויעיל.</td>
+            <td>מופיע בקוד; החלטת הנדסת-מודל.</td>
+          </tr>
+          <tr>
+            <td>Confidence threshold</td>
+            <td><code>0.5</code></td>
+            <td>אם המודל פחות מ-50% בטוח, הוא לא "ממציא" תווית אלא מחזיר <code>Undefined (10)</code>. זו בחירה שמעדיפה זהירות על פני ניחוש.</td>
+            <td>מופיע בקוד (<code>CONFIDENCE_THRESHOLD</code>); לא תועד כיול ROC במאמרים.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3>9.3 מה אנחנו יודעים בוודאות לעומת מה שדורש אישור</h3>
+      <ul>
+        <li><strong>וודאי:</strong> 250kHz, טריגר אנרגיה, מדדים מרכזיים (Start/End/Duration/BW/ICI) – מתועדים במאמרים.</li>
+        <li><strong>וודאי:</strong> ערכי הפרמטרים בפייפליין הנוכחי – ניתנים לאימות ישיר מהקוד.</li>
+        <li><strong>לא סגור מחקרית:</strong> מסמך כיול רשמי לכל סף (למשל למה דווקא <code>THRESH=20</code> או <code>0.5</code>) לא קיים כרגע בריפו.</li>
+      </ul>
+      <ul>
+        <li>סגמנטציה: <code>FRAME_LENGTH=0.006</code>, <code>OVERLAP=0.7</code>, <code>THRESH=20</code>, <code>HARMONY_TH=0.009</code>.</li>
+        <li>סינון סילבות: <code>MIN_LENGTH=0.01</code>, <code>MIN_BETWEEN_CALL=0.02</code>.</li>
+        <li>קלסיפיקציה: HPF 30kHz, STFT, resize, וסף ביטחון <code>0.5</code>.</li>
+      </ul>
+      <p class="warn">
+        לפי מצב הריפו הנוכחי, אין בקוד "מסמך כיול" שמוכיח מי קבע כל ערך ומול איזה סט ולידציה.
+        לכן, מדעית, נכון להתייחס לערכים האלה כבחירות מערכת היסטוריות עד לאישור מהחוקרת/צוות.
+      </p>
+    </div>
+
+    <div class="card" id="model-origin">
+      <h2>10) מאיפה הגיע המודל והמשקלים</h2>
+      <ul>
+        <li>המודל נטען מ-<code>models/model_weights.h6</code> (או נתיב שמוגדר ב-<code>USV_MODEL_PATH</code>).</li>
+        <li>ניתן לשמור אותו כקובץ יחיד או כתיקיית SavedModel בשם זהה.</li>
+        <li>הקוד כולל תיקון תאימות לשמות קבצי <code>variables</code> בחבילות מסוימות.</li>
+      </ul>
+      <p>
+        בריפו יש תיאור טכני של מיקום המודל, אבל אין metadata מחקרי מלא (למשל: מאגר אימון,
+        חלוקת train/val/test, metrics, תאריך אימון, אוגמנטציות, גרסת ארכיטקטורה).
+      </p>
+      <p class="note">
+        כלומר: אנחנו יודעים <strong>איך המודל נטען ומופעל</strong>, אבל לא את כל שרשרת ה-provenance המחקרית של המשקלים.
+      </p>
+    </div>
+
+    <div class="card" id="bio">
+      <h2>11) המשמעות הביולוגית לפי המאמרים</h2>
+      <h3>5.1 למה מין הוא משתנה קריטי</h3>
+      <ul>
+        <li>
+          <strong>Shekel 2021:</strong> נמצאו הבדלי מין במאפיינים ספקטרליים-טמפורליים של קריאות,
+          וכן אינטראקציות בין מין לבין הפקטור האוטיסטי (גנטי/סביבתי).
+        </li>
+        <li>
+          <strong>Gal 2023:</strong> הודגשו דינמיקות תלויות מין לאורך זמן ובין סשנים;
+          במודל Mthfr יש דפוסים שונים לזכרים/נקבות במדדים כגון תדרי התחלה/סיום וזמן בין קריאות.
+        </li>
+      </ul>
+      <p>
+        <strong>מסקנה:</strong> מין אינו "שדה דמוגרפי בלבד", אלא פקטור ביולוגי שמשנה את התוצאה.
+        לכן חסר בנתוני מין פוגע ישירות ביכולת פרשנות מדעית תקפה.
+      </p>
+
+      <h3>5.2 מה חשוב בסילבות מבחינת המחקר</h3>
+      <ul>
+        <li>המאמרים מדגישים ששינויי ASD לא מתבטאים רק בכמות הקריאות, אלא גם במבנה הספקטרלי-טמפורלי.</li>
+        <li>מדדים בולטים: Start Frequency, End Frequency, Bandwidth, Duration.</li>
+        <li>ב-<code>Shekel 2021</code> נעשתה קלסטריזציה בלתי מונחית ל-8 קלאסטרים שונים בכל מודל.</li>
+        <li>ב-<code>Gal 2023</code> הודגשה דינמיקה בזמן: בתוך סשן ובין S1/S2 (maternal potentiation).</li>
+      </ul>
+
+      <h3>5.3 קשר ל-Group (מורכבות)</h3>
+      <p>
+        ב-<code>Gal 2023</code> נעשה שימוש ב-3 רמות מורכבות (single/multiple/harmonic) כדי להבין
+        שינויי רפרטואר לאורך זמן ולזהות הבדלים בין קבוצות ניסוי.
+        כלומר קיבוץ לרמות מורכבות אינו רק טכני — הוא משמש יחידת ניתוח התנהגותית/ביולוגית.
+      </p>
+    </div>
+
+    <div class="card" id="research-guidelines">
+      <h2>12) איך לפרש נכון את הפלט במחקר</h2>
+      <ol>
+        <li>להציג תמיד גם <code>Syllable number</code> וגם <code>Complexity level</code>.</li>
+        <li>לדווח בנפרד את שיעור מחלקה <code>10</code> (Undefined/Low confidence).</li>
+        <li>לנתח בנפרד לפי מין או לכלול אינטראקציה סטטיסטית עם מין.</li>
+        <li>לא להסתמך רק על "מספר קריאות" — לכלול לפחות מדדים ספקטרליים וזמניים.</li>
+        <li>בנתוני זמן, לשקול דינמיקה של session/minute ולא רק ממוצע כולל.</li>
+      </ol>
+      <p class="muted">
+        ההמלצות הללו משקפות ישירות את המסקנות של Shekel 2021 ו-Gal 2023.
+      </p>
+    </div>
+
+    <div class="card" id="outputs">
+      <h2>13) פלטים ועמודות מרכזיות בקבצי התוצאה</h2>
+      <h3>קבצים עיקריים</h3>
+      <ul>
+        <li><code>segmentation_&lt;year&gt;_&lt;timestamp&gt;.xlsx</code></li>
+        <li><code>segmentation_classification_&lt;year&gt;_&lt;timestamp&gt;.xlsx</code></li>
+        <li><code>..._summary.xlsx</code></li>
+      </ul>
+      <h3>עמודות קריטיות להבנה</h3>
+      <ul>
+        <li><code>Syllable number</code> – תוצאת המחלקה המספרית (כולל 10).</li>
+        <li><code>Syllable type</code> – שם המחלקה לפי מיפוי קשיח.</li>
+        <li><code>Complexity level</code>, <code>Complexity level (numeric)</code>.</li>
+        <li><code>Duration</code>, <code>ISI/ICI</code>, <code>Start Point (Hz)</code>, <code>End Point (Hz)</code>.</li>
+      </ul>
+    </div>
+
+    <div class="card" id="open-questions">
+      <h2>14) שאלות רשמיות לחוקרת (לסגירת פערי מידע)</h2>
+      <p>
+        הנוסח הבא מיועד לפנייה מסודרת לחוקרת/PI. השאלות מתמקדות בנקודות שלא נמצאה להן תשובה חד-משמעית
+        בשני המאמרים, ושנחוצות כדי להפוך את הדאטה ל"בר-פרשנות מחקרית מלאה".
+      </p>
+
+      <h3>שאלות</h3>
+      <ol>
+        <li>
+          בשנת 2015 קיימת אי-התאמה בין מזהה בנתיב ההקלטה (<code>08146L</code>) לבין מזהה במטאדאטה (<code>08146K</code>).
+          האם מדובר באותה חיה (שגיאת תיעוד/איות), או בשתי חיות שונות?
+        </li>
+        <li>
+          בשנת 2018 יש שלושה פרטים ללא תיעוד מין.
+          האם יש מקור משלים (colony logs / raw metadata / lab notebook) שמאפשר השמת מין אמינה?
+          מאחר שבמאמרים דווחו השפעות תלויות-מין, האם נכון לסמן פרטים אלו כ"לא לניתוח מין" עד לאימות?
+        </li>
+        <li>
+          בשנת 2022 זוהו פרטים שאינם מופיעים במטאדאטה (למשל <code>22761P_1A</code>, <code>22768M_2A</code>) תחת תיקיית
+          <code>TEST</code>. מה משמעות תיקייה זו (פיילוט? כיול? אימות מערכת?), והאם נתונים אלו אמורים להיכלל באנליזה ביולוגית?
+        </li>
+        <li>
+          האם לצבעי סימון (<code>RED</code>, <code>GREEN</code>, <code>BLUE</code>) יש משמעות ביולוגית/ניסויית,
+          או שמדובר רק בסימון זיהוי טכני של פרטים/קבוצות?
+        </li>
+        <li>
+          עבור סימון <code>SUPP</code>: מהו התוסף, מטרת ההתערבות, מי קיבל בפועל (אם/צאצא/שניהם),
+          ומה היה פרוטוקול המתן (timing, dose, route)?
+        </li>
+        <li>
+          בשנת 2024 עבור <code>14164P-1C</code> חסר genotype גם בנתיב וגם במטאדאטה.
+          האם יש מקור גנוטיפ חלופי (PCR sheet / colony genotype file) שניתן לאחד?
+        </li>
+        <li>
+          בשנת 2024 מופיע סימון <code>litter 2 (2.7.24)</code>.
+          מה המשמעות המדויקת של הסימון? בנוסף, עבור <code>24277J-3A</code> שמסומן כמת — האם קיים תיעוד סיבת מוות?
+        </li>
+        <li>
+          בשנת 2024 קיימת עמודת <code>Group number</code>.
+          אנא אשרי האם זהו שיוך לקבוצת טיפול ניסויית, קבוצת אנליזה סטטיסטית, או קטגוריה תפעולית אחרת.
+        </li>
+      </ol>
+
+      <h3>למה השאלות האלו קריטיות</h3>
+      <ul>
+        <li>אי-ודאות בזיהוי פרט (ID) גורמת לטעויות Join ולהטיה בתוצאות.</li>
+        <li>חוסר בנתוני מין/genotype פוגע ישירות בפרשנות ביולוגית.</li>
+        <li>אי-בהירות ב-TEST/SUPP/Group עלולה לערבב נתוני מחקר עם נתוני פיילוט/QC.</li>
+      </ul>
+    </div>
+
+    <div class="card" id="glossary">
+      <h2>15) מילון מונחים קצר (לעבודה יומיומית)</h2>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>מונח</th>
+            <th>פירוש קצר</th>
+            <th>למה זה חשוב בפייפליין</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>USV</td>
+            <td>Ultrasonic Vocalization – קול אולטרסוני של עכברים.</td>
+            <td>זה האות שאנחנו מחפשים ומנתחים.</td>
+          </tr>
+          <tr>
+            <td>סילבה (Syllable)</td>
+            <td>אירוע קולי בודד עם התחלה וסיום בזמן.</td>
+            <td>יחידת הבסיס שעליה מחושבים כל המדדים והסיווג.</td>
+          </tr>
+          <tr>
+            <td>Segmentation</td>
+            <td>תהליך חלוקת ההקלטה לאירועים קוליים/לא קוליים.</td>
+            <td>קובע אילו קטעים בכלל ייכנסו להמשך ניתוח.</td>
+          </tr>
+          <tr>
+            <td>Frame</td>
+            <td>חלון זמן קצר מתוך האות (למשל 6ms).</td>
+            <td>הזיהוי נעשה על חלונות כאלה לפני איחוד לאירועים שלמים.</td>
+          </tr>
+          <tr>
+            <td>שלב ההקלטה (Acquisition)</td>
+            <td>השלב שבו המערכת מקליטה מהמיקרופון ושומרת קבצי שמע.</td>
+            <td>פרמטרים כמו sampling rate ו-trigger מוגדרים כאן, לפני הסגמנטציה.</td>
+          </tr>
+          <tr>
+            <td>STFT</td>
+            <td>Short-Time Fourier Transform – מעבר מתיאור בזמן לתיאור זמן-תדר.</td>
+            <td>משמש ליצירת הספקטרוגרמה שמוזנת ל-CNN.</td>
+          </tr>
+          <tr>
+            <td>Spectrogram</td>
+            <td>ייצוג חזותי של אנרגיה בתדר לאורך זמן.</td>
+            <td>זה הקלט העיקרי של מודל הסיווג.</td>
+          </tr>
+          <tr>
+            <td>PSD (Welch)</td>
+            <td>הערכת צפיפות ספקטרלית של עוצמה בתדר.</td>
+            <td>משמשת להערכת תדר התחלה/סיום של כל סילבה.</td>
+          </tr>
+          <tr>
+            <td>High-pass filter</td>
+            <td>פילטר שמעביר תדרים גבוהים ומחליש נמוכים.</td>
+            <td>מפחית רכיבים לא רלוונטיים לפני סיווג.</td>
+          </tr>
+          <tr>
+            <td>ISI</td>
+            <td>Inter-Syllable Interval – הזמן בין סוף סילבה אחת לתחילת הבאה.</td>
+            <td>מדד טמפורלי חשוב להשוואה בין קבוצות.</td>
+          </tr>
+          <tr>
+            <td>Confidence threshold</td>
+            <td>סף ביטחון לניבוי המודל (כאן 0.5).</td>
+            <td>אם הסף לא נחצה מתקבלת מחלקה 10 (Undefined).</td>
+          </tr>
+          <tr>
+            <td>Class 10 / Undefined</td>
+            <td>תוצאה של ביטחון נמוך או fallback מערכת.</td>
+            <td>חייבים לדווח בנפרד, כדי לא לערבב עם מחלקות "אמיתיות".</td>
+          </tr>
+          <tr>
+            <td>Complexity level</td>
+            <td>קיבוץ של סוגי סילבות ל-4 רמות: <code>0=Undefined</code>, <code>1=Single Vowel</code>, <code>2=Multiple Vowels</code>, <code>3=Advanced Harmonic</code>.</td>
+            <td>מאפשר ניתוח רפרטואר ברמת-על מעבר לסוג בודד, תוך הפרדה מפורשת של מקרי Undefined.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="muted">
+        טיפ פרקטי: כשיש ספק בפרשנות, תמיד חוזרים קודם ל-<code>Syllable number</code>, ל-<code>Duration</code>,
+        ול-<code>Start/End Point (Hz)</code> לפני מסקנה ביולוגית.
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>מקורות ותיחום</h2>
+      <ul>
+        <li>Shekel et al., 2021, Frontiers in Neuroscience 15:769670</li>
+        <li>Gal et al., 2023, Frontiers in Neuroscience 17:1274039</li>
+        <li>מימוש קוד פנימי: <code>pipeline.py</code>, <code>classification.py</code>, <code>enrich_columns.py</code></li>
+      </ul>
+      <p class="muted">
+        המסמך מתבסס על שני המאמרים שסופקו ועל הקוד הקיים. נקודות שאינן מופיעות במפורש במאמרים הוגדרו כשאלות פתוחות לחוקרת.
+      </p>
+    </div>
+  </div>
+</body>
+</html>
