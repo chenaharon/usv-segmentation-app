@@ -73,6 +73,8 @@ FINAL_COLUMN_ORDER = [
     "Sex",
     "Offspring Genotype",
     "Offspring Genotype (binary)",
+    "Genotype Group",
+    "Genotype Group (numeric)",
     "Supplement (Offspring)",
     "Day",
     "Session",
@@ -101,6 +103,44 @@ def _strain_label_from_year(y) -> str:
     except ValueError:
         yi = 0
     return "BALB/C" if yi in (2015, 2018) else "BALB/C+BLACK/C57"
+
+
+_GENOTYPE_NORMAL_VALUES = {"WT", "HT", "UNK", "NAN"}
+
+
+def _normalize_genotype(value) -> str:
+    """Normalize a raw genotype value to one of {WT, HT, UNK, NAN}.
+
+    - Real missing values (``NaN``/empty/``-``) are reported as ``NAN`` so the
+      reason a row was excluded from the WT/HT groups stays visible.
+    - Anything that is not ``WT`` or ``HT`` (and not missing) is reported as
+      ``UNK``, matching the labels used by the segmentation workbook.
+    """
+    if pd.isna(value):
+        return "NAN"
+    s = str(value).strip().upper()
+    if not s or s in {"NAN", "NA", "NONE", "-", "—"}:
+        return "NAN"
+    if s == "WT":
+        return "WT"
+    if s == "HT":
+        return "HT"
+    return "UNK"
+
+
+def _genotype_group_numeric(mother: str, offspring: str) -> int:
+    """Numeric encoding of the (Mother, Offspring) genotype combination.
+
+    Only the three explicitly requested combinations get a non-zero code,
+    every other pair (including any UNK/NAN) collapses to 0.
+    """
+    if mother == "WT" and offspring == "WT":
+        return 1
+    if mother == "HT" and offspring == "WT":
+        return 2
+    if mother == "HT" and offspring == "HT":
+        return 3
+    return 0
 
 
 def _supplement_flag(value) -> Optional[int]:
@@ -171,6 +211,16 @@ def enrich_segmentation_columns(
         df["Offspring Genotype"]
         .apply(lambda x: 1 if str(x).strip().upper() == "WT" else 0)
     )
+
+    # 4b. Genotype Group (Issue #2): combined Mother+Offspring label and
+    #     numeric encoding (WT-WT=1, HT-WT=2, HT-HT=3, anything else 0).
+    _mother_norm = df["Mother Genotype"].apply(_normalize_genotype)
+    _offspring_norm = df["Offspring Genotype"].apply(_normalize_genotype)
+    df["Genotype Group"] = _mother_norm.str.cat(_offspring_norm, sep="-")
+    df["Genotype Group (numeric)"] = [
+        _genotype_group_numeric(m, o)
+        for m, o in zip(_mother_norm, _offspring_norm)
+    ]
 
     # 5a. Syllable order within recording (by ascending Start point)
     #     Group by Path (unique per recording) to handle repeated Recording Numbers
