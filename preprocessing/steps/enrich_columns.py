@@ -143,6 +143,19 @@ def _genotype_group_numeric(mother: str, offspring: str) -> int:
     return 0
 
 
+def _genotype_binary(value) -> int:
+    """Binary encoding for the Mother/Offspring Genotype columns.
+
+    HT -> 1; everything else (WT, UNK, NAN, missing, or any unknown text) -> 0.
+    """
+    if pd.isna(value):
+        return 0
+    s = str(value).strip().upper()
+    if not s or s in {"NAN", "NA", "NONE", "-", "—"}:
+        return 0
+    return 1 if s == "HT" else 0
+
+
 def _supplement_flag(value) -> Optional[int]:
     if pd.isna(value):
         return None
@@ -200,17 +213,11 @@ def enrich_segmentation_columns(
     else:
         df["Year"] = year
 
-    # 3. Mother Genotype (binary): WT → 1, anything else → 0
-    df["Mother Genotype (binary)"] = (
-        df["Mother Genotype"]
-        .apply(lambda x: 1 if str(x).strip().upper() == "WT" else 0)
-    )
+    # 3. Mother Genotype (binary): HT → 1, anything else (WT/UNK/NAN/...) → 0
+    df["Mother Genotype (binary)"] = df["Mother Genotype"].apply(_genotype_binary)
 
-    # 4. Offspring Genotype (binary): WT → 1, anything else → 0
-    df["Offspring Genotype (binary)"] = (
-        df["Offspring Genotype"]
-        .apply(lambda x: 1 if str(x).strip().upper() == "WT" else 0)
-    )
+    # 4. Offspring Genotype (binary): HT → 1, anything else (WT/UNK/NAN/...) → 0
+    df["Offspring Genotype (binary)"] = df["Offspring Genotype"].apply(_genotype_binary)
 
     # 4b. Genotype Group (Issue #2): combined Mother+Offspring label and
     #     numeric encoding (WT-WT=1, HT-WT=2, HT-HT=3, anything else 0).
