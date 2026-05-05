@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="he" dir="rtl">
 <head>
   <meta charset="utf-8">
@@ -543,8 +543,42 @@ else:
         <li><code>Syllable number</code> – תוצאת המחלקה המספרית (כולל 10).</li>
         <li><code>Syllable type</code> – שם המחלקה לפי מיפוי קשיח.</li>
         <li><code>Complexity level</code>, <code>Complexity level (numeric)</code>.</li>
+        <li><code>Genotype Group</code>, <code>Genotype Group (numeric)</code> – שילוב גנוטיפ אם וצאצא לקבוצה אחת לניתוח.</li>
         <li><code>Duration</code>, <code>ISI/ICI</code>, <code>Start Point (Hz)</code>, <code>End Point (Hz)</code>.</li>
       </ul>
+
+      <h3>עמודת Genotype Group</h3>
+      <p>
+        העמודה <code>Genotype Group</code> משלבת את <code>Mother Genotype</code> ו-<code>Offspring Genotype</code>
+        לתווית טקסטואלית אחת בפורמט <code>Mother-Offspring</code> (למשל <code>WT-WT</code>, <code>HT-WT</code>, <code>WT-UNK</code>).
+        ערכים חסרים מסומנים <code>NAN</code> וערכים שאינם <code>WT</code>/<code>HT</code> מסומנים <code>UNK</code>,
+        כדי לשמר את ההבדל בין "חסר תיעוד" לבין "תיעוד שאינו WT/HT".
+      </p>
+      <p>
+        העמודה <code>Genotype Group (numeric)</code> נותנת קוד מספרי לקומבינציות מחקריות מרכזיות בלבד,
+        וכל קומבינציה אחרת (כולל UNK/NAN ו-WT-HT) מקבלת <code>0</code>:
+      </p>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Mother Genotype</th>
+            <th>Offspring Genotype</th>
+            <th>Genotype Group</th>
+            <th>Genotype Group (numeric)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>WT</td><td>WT</td><td>WT-WT</td><td>1</td></tr>
+          <tr><td>HT</td><td>WT</td><td>HT-WT</td><td>2</td></tr>
+          <tr><td>HT</td><td>HT</td><td>HT-HT</td><td>3</td></tr>
+          <tr><td>WT</td><td>UNK</td><td>WT-UNK</td><td>0</td></tr>
+          <tr><td>UNK</td><td>HT</td><td>UNK-HT</td><td>0</td></tr>
+          <tr><td>NAN</td><td>WT</td><td>NAN-WT</td><td>0</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">
+        העמודה הזו ממוקמת בקובץ הסגמנטציה בין <code>Offspring Genotype (binary)</code> ל-<code>Supplement (Offspring)</code>.
+      </p>
     </div>
 
     <div class="card" id="open-questions">
