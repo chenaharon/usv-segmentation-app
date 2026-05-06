@@ -3,8 +3,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$PortableExeName = "USV Segmentation (v1.0.0).exe"
-$InstallerExeName = "USV Segmentation Installer (v1.0.0).exe"
+$PortableExeName = "USV Segmentation (v1.0.1).exe"
+$InstallerExeName = "USV Segmentation Installer (v1.0.1).exe"
 
 function Write-Step($msg) {
     Write-Host ""

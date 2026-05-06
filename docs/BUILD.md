@@ -9,7 +9,7 @@ pip install -r requirements.txt pyinstaller
 pyinstaller SegmentationAppPortable.spec
 ```
 
-Output: `dist/USV Segmentation (v1.0.0).exe` (single file; from `name=` in `SegmentationAppPortable.spec`; first launch may be slow while extracting). The EXE uses `assets/app_icon.ico` (generated from `app_icon.png`); rebuild the `.ico` after changing the PNG if needed.
+Output: `dist/USV Segmentation (v1.0.1).exe` (single file; from `name=` in `SegmentationAppPortable.spec`; first launch may be slow while extracting). The EXE uses `assets/app_icon.ico` (generated from `app_icon.png`); rebuild the `.ico` after changing the PNG if needed.
 
 ## Windows — installer (onedir + Inno Setup)
 
