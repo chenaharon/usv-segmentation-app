@@ -3,7 +3,7 @@
 ;   pyinstaller -y --distpath dist_installer_stage SegmentationAppInstaller.spec
 #define InstallerStageRoot "dist_installer_stage"
 #define MyAppName "USV Segmentation"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "Your Lab"
 ; Output folder ``name=`` in COLLECT inside ``SegmentationAppInstaller.spec``
 #define InstallBuildDir "USV_Segmentation_Install"
@@ -32,7 +32,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\{#InstallerStageRoot}\{#InstallBuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\{#InstallerStageRoot}\{#InstallBuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__\*"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

@@ -61,7 +61,7 @@ _LOADING_PROGRESS_BAR_HEIGHT = 16
 _PROGRESS_PCT_FONT_SIZE = 10
 
 # First public release; bump when shipping new versions.
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 
 class _SolidChevronOptionMenu(ctk.CTkOptionMenu):
