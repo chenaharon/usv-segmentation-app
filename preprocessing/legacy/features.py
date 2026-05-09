@@ -49,8 +49,10 @@ def _welch_psd(seg, rate, nperseg=1024, noverlap=625):
 def ISI_time(rec_numSyl,startSyl,endSyl):
   ISI = []
   for i in range(len(rec_numSyl)):
-    if rec_numSyl[i] == rec_numSyl[i-1]:
-      ISI.append(startSyl[i] - endSyl[i-1])
+    if i == 0:
+      ISI.append(np.NaN)
+    elif rec_numSyl[i] == rec_numSyl[i - 1]:
+      ISI.append(startSyl[i] - endSyl[i - 1])
     else:
       ISI.append(np.NaN)
   return ISI

@@ -74,6 +74,7 @@ App version string is in `app.py` (`APP_VERSION`).
 
 When shipping:
 
-- bump version
-- rebuild portable and installer artifacts
-- verify docs are up to date
+- Bump version everywhere artifacts encode it — see **Version bump checklist** in `docs/BUILD.md` (`SegmentationAppPortable.spec`, `installer/SegmentationApp.iss` `#define MyAppVersion`, `scripts/build_windows.ps1`, `scripts/build_macos.sh`).
+- Use **versioned output names** so older builds are not overwritten: portable `USV Segmentation (vX.Y.Z) - Portable.*`, installer `USV Segmentation Setup (vX.Y.Z).exe` (details in `docs/BUILD.md`).
+- On Windows, Inno’s compiler is usually `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe` if not on `PATH`; `scripts/build_windows.ps1` searches standard locations.
+- Rebuild portable and installer artifacts and verify `docs/BUILD.md` examples still match filenames.

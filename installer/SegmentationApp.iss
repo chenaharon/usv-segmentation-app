@@ -3,7 +3,7 @@
 ;   pyinstaller -y --distpath dist_installer_stage SegmentationAppInstaller.spec
 #define InstallerStageRoot "dist_installer_stage"
 #define MyAppName "USV Segmentation"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "Your Lab"
 ; Output folder ``name=`` in COLLECT inside ``SegmentationAppInstaller.spec``
 #define InstallBuildDir "USV_Segmentation_Install"
@@ -19,7 +19,8 @@ SetupIconFile=..\assets\app_icon.ico
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 OutputDir=..\dist_installer
-OutputBaseFilename=USV_Segmentation_Setup
+; Base name without .exe — include version so new builds do not overwrite older installers.
+OutputBaseFilename="USV Segmentation Setup (v{#MyAppVersion})"
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
