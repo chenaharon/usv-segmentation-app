@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 import pandas as pd
 import logging
 
-from utils import SEGMENTATION_RESULT_COLUMNS
+from utils import SEGMENTATION_RESULT_COLUMNS, normalize_session_cell
 
 
 def read_segmentation_results(
@@ -51,7 +51,7 @@ def read_segmentation_results(
     sex = df['Sex'].tolist()
     pupgen = df['Offspring Genotype'].tolist()
     age = df['Day'].tolist()
-    session = df['Session'].tolist()
+    session = [normalize_session_cell(v) for v in df["Session"].tolist()]
     rec_num = df['Recording Number'].tolist()
     start = df['Start point(s)'].tolist()
     end = df['End point(s)'].tolist()

@@ -464,6 +464,25 @@ def get_output_filename(metadata_file_name: str) -> str:
     return f"segmentation_{year}_{number}.xlsx"
 
 
+def normalize_session_cell(value: Any) -> int:
+    """
+    Recording session as a positive integer. Missing, blank, or non-positive
+    values default to 1 (never persist 0 as “unknown session”).
+    """
+    if value is None:
+        return 1
+    if isinstance(value, float) and pd.isna(value):
+        return 1
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none", "-", "—", "n/a", "na"):
+        return 1
+    try:
+        n = int(float(s))
+    except (TypeError, ValueError):
+        return 1
+    return n if n > 0 else 1
+
+
 def normalize_sex_cell(value: Any) -> str:
     """
     Map spreadsheet sex values to ``M`` / ``F`` / ``U``.
@@ -514,5 +533,6 @@ def read_metadata_as_lists(metadata_path: str) -> Dict[str, List]:
 
     out = {c: df[c].tolist() for c in METADATA_REQUIRED_COLUMNS}
     out["Sex"] = [normalize_sex_cell(v) for v in out["Sex"]]
+    out["Session"] = [normalize_session_cell(v) for v in out["Session"]]
     return out
 

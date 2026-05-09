@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="USV Segmentation (v1.0.1)"
+APP_NAME="USV Segmentation (v1.0.2) - Portable"
 APP_BUNDLE="dist/${APP_NAME}.app"
-DMG_NAME="USV Segmentation Installer (v1.0.1).dmg"
+DMG_NAME="USV Segmentation Setup (v1.0.2).dmg"
 
 echo "==> Installing build dependencies"
 python3 -m pip install --upgrade pip

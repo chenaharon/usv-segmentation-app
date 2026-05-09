@@ -3,8 +3,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$PortableExeName = "USV Segmentation (v1.0.1).exe"
-$InstallerExeName = "USV Segmentation Installer (v1.0.1).exe"
+$PortableExeName = "USV Segmentation (v1.0.2) - Portable.exe"
+# Must match OutputBaseFilename (+ .exe) in installer/SegmentationApp.iss.
+$InstallerExeName = "USV Segmentation Setup (v1.0.2).exe"
 
 function Write-Step($msg) {
     Write-Host ""
@@ -35,12 +36,24 @@ if ($SkipInstaller) {
 }
 
 Write-Step "Building installer with Inno Setup"
-$iscc = Get-Command "iscc" -ErrorAction SilentlyContinue
-if (-not $iscc) {
-    throw "Inno Setup compiler (iscc) not found in PATH. Install Inno Setup 6 and add iscc to PATH, or run with -SkipInstaller."
+function Resolve-IsccPath {
+    $cmd = Get-Command "iscc" -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($p in @(
+        (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )) {
+        if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+    }
+    return $null
 }
-
-iscc "installer/SegmentationApp.iss"
+$isccExe = Resolve-IsccPath
+if (-not $isccExe) {
+    throw "Inno Setup compiler (ISCC.exe) not found. Install Inno Setup 6 or add iscc to PATH, or run with -SkipInstaller."
+}
+Write-Host "Using: $isccExe" -ForegroundColor DarkGray
+& $isccExe "installer/SegmentationApp.iss"
 
 if (-not (Test-Path "dist_installer")) {
     throw "Installer build failed: dist_installer folder was not produced."

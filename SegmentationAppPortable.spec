@@ -51,7 +51,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='USV Segmentation (v1.0.1)',
+    name='USV Segmentation (v1.0.2) - Portable',
     icon=app_icon,
     debug=False,
     bootloader_ignore_signals=False,
